@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Placeholder icon: a rounded tile with three stacked layers. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FF16161E"
+        android:pathData="M24,8h60a16,16 0,0 1,16 16v60a16,16 0,0 1,-16 16h-60a16,16 0,0 1,-16 -16v-60a16,16 0,0 1,16 -16z" />
+    <path
+        android:fillColor="#FF3B4261"
+        android:pathData="M30,62h48a6,6 0,0 1,6 6v6a6,6 0,0 1,-6 6h-48a6,6 0,0 1,-6 -6v-6a6,6 0,0 1,6 -6z" />
+    <path
+        android:fillColor="#FF565F89"
+        android:pathData="M30,46h48a6,6 0,0 1,6 6v6a6,6 0,0 1,-6 6h-48a6,6 0,0 1,-6 -6v-6a6,6 0,0 1,6 -6z" />
+    <path
+        android:fillColor="#FF7AA2F7"
+        android:pathData="M30,30h48a6,6 0,0 1,6 6v6a6,6 0,0 1,-6 6h-48a6,6 0,0 1,-6 -6v-6a6,6 0,0 1,6 -6z" />
+</vector>

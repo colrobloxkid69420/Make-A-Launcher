@@ -1,0 +1,7 @@
+# Theme settings. Every layer reads its colours from here,
+# so changing one line restyles the whole preset.
+accent: '#FF7AA2F7'
+warm: '#FFFF9E64'
+surface: '#FF1F2335'
+text: '#FFE6E8F0'
+muted: '#99E6E8F0'

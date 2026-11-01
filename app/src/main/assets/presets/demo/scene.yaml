@@ -1,0 +1,231 @@
+# Phase 1 demo preset. Swipe left and right between the three pages.
+#
+# Things to notice in the stats overlay:
+# - Idle on page 1, nothing redraws except once a minute (the clock).
+# - Page 2 shows seconds, so a seconds timer runs and exactly one text redraws each second.
+# - Scrolling moves cached layers only: "redraws" stays at 0 while "moves" goes up.
+
+pages: 3
+background: '#FF16161E'
+
+layers:
+  # ---- Fixed on screen ---------------------------------------------------------------
+
+  - id: clock
+    type: text
+    text: '{time.format("HH:mm")}'
+    size: 88
+    bold: true
+    color: '{globals.text}'
+    anchor: top-center
+    offset: [0, 96]
+    animate:
+      - on: scroll
+        range: [0, 1]
+        ease: out
+        translate_y: [0, -56]
+        alpha: [1, 0.15]
+
+  - id: date
+    type: text
+    text: '{time.format("EEEE, d MMMM")}'
+    size: 18
+    color: '{globals.muted}'
+    anchor: top-center
+    offset: [0, 206]
+    animate:
+      - on: scroll
+        range: [0, 1]
+        translate_y: [0, -40]
+        alpha: [1, 0]
+
+  - id: dot-1
+    type: shape
+    shape: oval
+    width: 8
+    height: 8
+    fill: '{globals.text}'
+    anchor: bottom-center
+    offset: [-20, -72]
+    animate:
+      - on: scroll
+        alpha: [1, 0.3, 0.3]
+        scale: [1.3, 1, 1]
+
+  - id: dot-2
+    type: shape
+    shape: oval
+    width: 8
+    height: 8
+    fill: '{globals.text}'
+    anchor: bottom-center
+    offset: [0, -72]
+    animate:
+      - on: scroll
+        alpha: [0.3, 1, 0.3]
+        scale: [1, 1.3, 1]
+
+  - id: dot-3
+    type: shape
+    shape: oval
+    width: 8
+    height: 8
+    fill: '{globals.text}'
+    anchor: bottom-center
+    offset: [20, -72]
+    animate:
+      - on: scroll
+        alpha: [0.3, 0.3, 1]
+        scale: [1, 1, 1.3]
+
+  # ---- Page 1: battery card ---------------------------------------------------------
+
+  - id: battery-card
+    type: group
+    page: 0
+    anchor: center
+    offset: [0, 40]
+    width: 300
+    height: 128
+    children:
+      - id: battery-card-bg
+        type: shape
+        width: 300
+        height: 128
+        radius: 28
+        fill: '{globals.surface}'
+
+      - id: battery-level
+        type: text
+        text: '{battery.level}%'
+        size: 44
+        bold: true
+        color: '{globals.accent}'
+        anchor: top-left
+        offset: [28, 22]
+
+      - id: battery-label
+        type: text
+        text: Battery
+        size: 14
+        color: '{globals.muted}'
+        anchor: top-left
+        offset: [30, 82]
+
+      - id: battery-charging
+        type: text
+        text: Charging
+        size: 14
+        bold: true
+        color: '{globals.warm}'
+        visible: '{battery.charging}'
+        anchor: top-left
+        offset: [94, 82]
+
+      # A 100dp track with a bar whose width is the battery level in dp.
+      - id: battery-track
+        type: shape
+        width: 100
+        height: 8
+        radius: 4
+        fill: '#22FFFFFF'
+        anchor: center-left
+        offset: [172, 0]
+
+      - id: battery-bar
+        type: shape
+        width: '{battery.level}'
+        height: 8
+        radius: 4
+        fill: '{globals.accent}'
+        anchor: center-left
+        offset: [172, 0]
+
+  # ---- Page 2: seconds and parallax -------------------------------------------------
+
+  - id: seconds
+    type: text
+    page: 1
+    text: '{time.format("ss")}'
+    size: 120
+    bold: true
+    color: '{globals.accent}'
+    anchor: center
+    offset: [0, 20]
+
+  - id: seconds-label
+    type: text
+    page: 1
+    text: seconds (this is the only thing redrawing)
+    size: 14
+    color: '{globals.muted}'
+    anchor: center
+    offset: [0, 110]
+
+  - id: orb-back
+    type: shape
+    page: 1
+    shape: oval
+    width: 220
+    height: 220
+    fill: '#147AA2F7'
+    anchor: center
+    offset: [-90, -150]
+    animate:
+      - on: scroll
+        translate_x: [160, 0, -160]
+
+  - id: orb-front
+    type: shape
+    page: 1
+    shape: oval
+    width: 120
+    height: 120
+    stroke: '#55FF9E64'
+    stroke_width: 2
+    anchor: center
+    offset: [110, -110]
+    animate:
+      - on: scroll
+        translate_x: [-120, 0, 120]
+        rotation: [-30, 0, 30]
+
+  # ---- Page 3: about ---------------------------------------------------------------
+
+  - id: about-card
+    type: shape
+    page: 2
+    width: 320
+    height: 220
+    radius: 28
+    fill: '{globals.surface}'
+    anchor: center
+    offset: [0, 40]
+    animate:
+      - on: scroll
+        range: [1, 2]
+        scale: [0.9, 1]
+        alpha: [0, 1]
+
+  - id: about-title
+    type: text
+    page: 2
+    text: Make-A-Launcher
+    size: 24
+    bold: true
+    color: '{globals.text}'
+    anchor: center
+    offset: [0, -30]
+
+  - id: about-body
+    type: text
+    page: 2
+    text: |-
+      Phase 1 engine prototype. Every layer here comes from scene.yaml.
+      Long-press for the stress test.
+    size: 14
+    color: '{globals.muted}'
+    align: center
+    width: 260
+    anchor: center
+    offset: [0, 50]

@@ -1,0 +1,6 @@
+name: Demo
+author: Make-A-Launcher
+version: 0.1.0
+schema: 1
+description: Phase 1 demo - a clock, a live battery card and parallax across three pages.
+capabilities: [battery]
