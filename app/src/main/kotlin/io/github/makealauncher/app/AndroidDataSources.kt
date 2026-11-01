@@ -24,18 +24,23 @@ class AndroidDataSources(private val context: Context, private val data: DataSou
 
     private val timeReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
+            EnergyCounters.wakeups++
             data.time.onMinute()
             updateSecondTicker()
         }
     }
 
     private val batteryReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) = readBattery(intent)
+        override fun onReceive(context: Context, intent: Intent) {
+            EnergyCounters.wakeups++
+            readBattery(intent)
+        }
     }
 
     private val secondTicker = object : Runnable {
         override fun run() {
             if (!running) return
+            EnergyCounters.wakeups++
             data.time.onSecond()
             if (data.time.secondsNeeded) scheduleNextSecond()
         }

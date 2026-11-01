@@ -32,6 +32,32 @@ The overlay shows how close we are:
 What you should see: while idle, nothing redraws except once a minute (or once a second on
 the page that shows seconds). While scrolling, `redraws` stays at 0 and only `moves` goes up.
 
+## Measuring battery
+
+Battery use comes from three places: work while the screen is on (frames, CPU), work while
+the launcher is hidden (wakeups), and radios such as location. The app tracks the first two
+and is built to keep them near zero.
+
+| Where | What it shows |
+| --- | --- |
+| Overlay `power:` line | The app's CPU use (percent of one core) and the whole phone's current draw. |
+| Overlay `last hidden:` line | Whether anything ran while the app was off screen. It should say *no background work*. |
+| Menu → **Battery test: idle** (10 min) | Screen kept on, untouched. Reports CPU %, frames/s, wakeups/min, average phone current and mAh used. |
+| Menu → **Battery test: scrolling** (2 min) | Pages scroll by themselves the whole time: the worst case for animation work. |
+| Menu → **Battery log** | Totals for time on screen and time hidden, from a log kept across app restarts. **Share** sends it as text with the raw CSV. |
+
+Phone current includes the screen, which usually dominates, so compare like with like:
+
+1. Set a fixed brightness and turn off adaptive brightness.
+2. Run the idle test with **Blank preset (battery baseline)**, then with the preset you're
+   checking. The difference is what the preset costs.
+3. Run the scrolling test the same way for the cost of animation.
+
+Some phones don't report current or report it coarsely; CPU % and wakeups are reliable on
+every phone. To compare with another launcher or KLWP over a whole day, use Android's own
+accounting: `adb shell dumpsys batterystats --reset`, use the phone normally, then
+`adb shell dumpsys batterystats <package>` and compare the CPU time and estimated power use.
+
 ## How it works
 
 ```

@@ -8,19 +8,24 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.os.Handler
 import android.os.Looper
-import android.view.FrameMetrics
+import android.os.Process
 import android.view.View
-import android.view.Window
 import io.github.makealauncher.core.runtime.SceneRuntime
 import java.util.Locale
 import kotlin.math.max
 
 /**
- * The Phase 1 benchmark readout: frame times from the system's FrameMetrics, plus what the
- * engine did each second. It refreshes twice a second, so those refreshes show up as the
- * idle frame rate; everything else on screen draws only when it changes.
+ * The Phase 1 benchmark readout: frame times, what the engine did each second, and a live
+ * power line (the app's CPU use and the phone's current draw).
+ *
+ * It refreshes twice a second, which shows up as about 2 frames/s while idle and costs a
+ * little battery itself; the battery tests hide it while they run.
  */
-class StatsOverlay(context: Context) : View(context) {
+class StatsOverlay(
+    context: Context,
+    private val frames: FrameStats,
+    private val monitor: EnergyMonitor,
+) : View(context) {
     private val density = resources.displayMetrics.density
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
@@ -31,11 +36,6 @@ class StatsOverlay(context: Context) : View(context) {
     private val box = RectF()
     private val uiHandler = Handler(Looper.getMainLooper())
 
-    private val frameNanos = LongArray(240)
-    private var frameCount = 0
-    private var framesInWindow = 0
-    private var refreshNanos = 16_666_667L
-
     private var runtime: SceneRuntime? = null
     private var scene: SceneView? = null
     private var presetName = ""
@@ -43,18 +43,13 @@ class StatsOverlay(context: Context) : View(context) {
     private var lines = listOf("Loading…")
 
     private var lastSampleTime = 0L
+    private var lastFrames = 0L
     private var lastBindingRuns = 0L
     private var lastContent = 0L
     private var lastTransforms = 0L
     private var lastWorkNanos = 0L
     private var lastWorkFrames = 0L
-
-    private val metricsListener = Window.OnFrameMetricsAvailableListener { _, metrics, _ ->
-        val total = metrics.getMetric(FrameMetrics.TOTAL_DURATION)
-        frameNanos[frameCount % frameNanos.size] = total
-        frameCount++
-        framesInWindow++
-    }
+    private var lastCpuMs = 0L
 
     private val tick = object : Runnable {
         override fun run() {
@@ -62,15 +57,6 @@ class StatsOverlay(context: Context) : View(context) {
             invalidate()
             uiHandler.postDelayed(this, 500)
         }
-    }
-
-    fun attach(window: Window, refreshRate: Float) {
-        if (refreshRate > 0f) refreshNanos = (1_000_000_000L / refreshRate).toLong()
-        window.addOnFrameMetricsAvailableListener(metricsListener, uiHandler)
-    }
-
-    fun detach(window: Window) {
-        window.removeOnFrameMetricsAvailableListener(metricsListener)
     }
 
     fun bind(runtime: SceneRuntime, scene: SceneView, presetName: String, warnings: List<String>) {
@@ -90,12 +76,16 @@ class StatsOverlay(context: Context) : View(context) {
     override fun onVisibilityChanged(changedView: View, visibility: Int) {
         super.onVisibilityChanged(changedView, visibility)
         uiHandler.removeCallbacks(tick)
-        if (visibility == VISIBLE && isAttachedToWindow) uiHandler.post(tick)
+        lastSampleTime = 0L
+        if (isShown && isAttachedToWindow) uiHandler.post(tick)
     }
 
-    override fun onAttachedToWindow() {
-        super.onAttachedToWindow()
-        if (visibility == VISIBLE) uiHandler.post(tick)
+    /** The window hides when the app leaves the screen; stop ticking so nothing runs in the background. */
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        uiHandler.removeCallbacks(tick)
+        lastSampleTime = 0L
+        if (visibility == VISIBLE && isShown) uiHandler.post(tick)
     }
 
     override fun onDetachedFromWindow() {
@@ -108,49 +98,52 @@ class StatsOverlay(context: Context) : View(context) {
         val sv = scene ?: return
         val now = System.nanoTime()
         val stats = rt.stats
+        val cpuMs = Process.getElapsedCpuTime()
         if (lastSampleTime == 0L) {
-            lastSampleTime = now
-            lastBindingRuns = stats.bindingRuns
-            lastContent = stats.contentUpdates
-            lastTransforms = stats.transformUpdates
-            lastWorkNanos = sv.totalWorkNanos
-            lastWorkFrames = sv.workFrames
-            framesInWindow = 0
+            remember(now, rt, sv, cpuMs)
             return
         }
         val seconds = (now - lastSampleTime) / 1e9
         if (seconds < 0.25) return
 
-        val n = minOf(frameCount, frameNanos.size)
-        val recent = frameNanos.copyOf(n).sortedArray()
-        val p50 = if (n > 0) recent[n / 2] / 1e6 else 0.0
-        val p95 = if (n > 0) recent[minOf(n - 1, (n * 95) / 100)] / 1e6 else 0.0
-        val slow = if (n > 0) recent.count { it > refreshNanos } * 100 / n else 0
-        val fps = framesInWindow / seconds
+        val fps = (frames.totalFrames - lastFrames) / seconds
         val workFrames = sv.workFrames - lastWorkFrames
         val workMs = if (workFrames > 0) (sv.totalWorkNanos - lastWorkNanos) / 1e6 / workFrames else 0.0
+        val cpuPercent = (cpuMs - lastCpuMs) / 10.0 / seconds
+        val current = monitor.currentMicroAmps()
 
         lines = buildList {
             add("$presetName · ${rt.nodes.size - 1} components · page ${fmt(rt.scrollPosition + 1, 1)}/${rt.pages}")
-            add("frames/s ${fmt(fps, 0)}   p50 ${fmt(p50, 1)} ms   p95 ${fmt(p95, 1)} ms   slow ${slow}%")
+            add(
+                "frames/s ${fmt(fps, 0)}   p50 ${fmt(frames.recentPercentileMs(50), 1)} ms   " +
+                    "p95 ${fmt(frames.recentPercentileMs(95), 1)} ms   slow ${frames.recentSlowPercent()}%",
+            )
             add("engine ${fmt(workMs, 2)} ms/frame")
             add(
                 "per s: ${rate(stats.bindingRuns, lastBindingRuns, seconds)} bindings · " +
                     "${rate(stats.contentUpdates, lastContent, seconds)} redraws · " +
                     "${rate(stats.transformUpdates, lastTransforms, seconds)} moves",
             )
+            add("power: app CPU ${fmt(cpuPercent, 1)}% · phone ${current?.let { "${it / 1000} mA" } ?: "n/a"}")
+            monitor.lastBackground()?.let { bg ->
+                add("last hidden: " + if (bg.clean) "no background work" else "${bg.engineUpdates} updates, ${bg.wakeups} wakeups")
+            }
             val errors = rt.runtimeErrors.size + problems.size
             if (errors > 0) add("$errors warning(s); see logcat")
-            add("long-press: presets and stats")
+            add("long-press: presets, battery tests")
         }
+        remember(now, rt, sv, cpuMs)
+    }
 
+    private fun remember(now: Long, rt: SceneRuntime, sv: SceneView, cpuMs: Long) {
         lastSampleTime = now
-        lastBindingRuns = stats.bindingRuns
-        lastContent = stats.contentUpdates
-        lastTransforms = stats.transformUpdates
+        lastFrames = frames.totalFrames
+        lastBindingRuns = rt.stats.bindingRuns
+        lastContent = rt.stats.contentUpdates
+        lastTransforms = rt.stats.transformUpdates
         lastWorkNanos = sv.totalWorkNanos
         lastWorkFrames = sv.workFrames
-        framesInWindow = 0
+        lastCpuMs = cpuMs
     }
 
     private fun rate(now: Long, before: Long, seconds: Double) = fmt((now - before) / seconds, 0)

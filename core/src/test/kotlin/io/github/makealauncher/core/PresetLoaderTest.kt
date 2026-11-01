@@ -112,6 +112,13 @@ class PresetLoaderTest {
     }
 
     @Test
+    fun blankBaselinePresetLoads() {
+        val result = PresetLoader.load(io.github.makealauncher.core.scene.BuiltInPresets.blank())
+        assertEquals(emptyList(), result.problems.map { it.toString() })
+        assertEquals(0, result.preset!!.scene.layers.size)
+    }
+
+    @Test
     fun missingSceneFile() {
         val result = PresetLoader.load { null }
         assertNull(result.preset)

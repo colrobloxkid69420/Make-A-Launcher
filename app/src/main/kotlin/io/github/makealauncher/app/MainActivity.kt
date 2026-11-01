@@ -3,36 +3,45 @@ package io.github.makealauncher.app
 import android.app.Activity
 import android.app.AlertDialog
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.widget.FrameLayout
 import io.github.makealauncher.core.data.DataSources
+import io.github.makealauncher.core.energy.EnergyLog
 import io.github.makealauncher.core.reactive.Graph
 import io.github.makealauncher.core.runtime.SceneRuntime
+import io.github.makealauncher.core.scene.BuiltInPresets
 import io.github.makealauncher.core.scene.PresetFiles
 import io.github.makealauncher.core.scene.PresetLoader
 import io.github.makealauncher.core.scene.Severity
 import io.github.makealauncher.core.scene.StressPreset
 
 /**
- * Phase 1 host: loads a preset, runs it in a [SceneView], and shows the benchmark statsOverlay.
- * Long-press anywhere to switch between the demo preset and the 300-component stress test.
+ * Phase 1 host: loads a preset, runs it in a [SceneView], shows the benchmark overlay and
+ * tracks energy use. Long-press anywhere for presets, battery tests and the battery log.
  */
 class MainActivity : Activity() {
     private lateinit var sceneView: SceneView
     private lateinit var statsOverlay: StatsOverlay
+    private lateinit var monitor: EnergyMonitor
+    private lateinit var tests: PowerTests
+    private val frameStats = FrameStats()
 
     private var runtime: SceneRuntime? = null
     private var sources: AndroidDataSources? = null
     private var started = false
     private var currentPreset = PRESET_DEMO
+    private var currentPresetName = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        monitor = EnergyMonitor(this, frameStats)
         sceneView = SceneView(this).apply { onLongPress = { showMenu() } }
-        statsOverlay = StatsOverlay(this).apply {
+        statsOverlay = StatsOverlay(this, frameStats, monitor).apply {
             setOnApplyWindowInsetsListener { v, insets ->
                 val bars = insets.getInsets(WindowInsets.Type.systemBars())
                 v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
@@ -44,7 +53,8 @@ class MainActivity : Activity() {
             addView(statsOverlay, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         }
         setContentView(root)
-        statsOverlay.attach(window, display?.refreshRate ?: 60f)
+        frameStats.attach(window, Handler(Looper.getMainLooper()), display?.refreshRate ?: 60f)
+        tests = PowerTests(this, monitor, frameStats, sceneView, statsOverlay) { currentPresetName }
 
         currentPreset = savedInstanceState?.getString(KEY_PRESET) ?: intent.getStringExtra(KEY_PRESET) ?: PRESET_DEMO
         load(currentPreset)
@@ -54,18 +64,23 @@ class MainActivity : Activity() {
         super.onStart()
         started = true
         sources?.start()
-        sceneView.requestFrame()
+        sceneView.active = true
+        monitor.onVisible()
+        tests.showPendingNotice()
     }
 
     override fun onStop() {
-        // Sleep hard: no tickers or listeners while the launcher isn't visible.
+        // Sleep hard: no frames, tickers or listeners while the launcher isn't visible.
+        tests.interrupt()
+        sceneView.active = false
         sources?.stop()
         started = false
+        monitor.onHidden()
         super.onStop()
     }
 
     override fun onDestroy() {
-        statsOverlay.detach(window)
+        frameStats.detach(window)
         runtime?.dispose()
         super.onDestroy()
     }
@@ -76,14 +91,11 @@ class MainActivity : Activity() {
     }
 
     private fun load(which: String) {
-        val assetsDir: PresetAssets?
-        val files: PresetFiles
-        if (which == PRESET_STRESS) {
-            assetsDir = null
-            files = StressPreset.files(count = 300, pages = 3)
-        } else {
-            assetsDir = PresetAssets(assets, "presets/demo")
-            files = assetsDir
+        var assetsDir: PresetAssets? = null
+        val files: PresetFiles = when (which) {
+            PRESET_STRESS -> StressPreset.files(count = 300, pages = 3)
+            PRESET_BLANK -> BuiltInPresets.blank()
+            else -> PresetAssets(assets, "presets/demo").also { assetsDir = it }
         }
 
         val result = PresetLoader.load(files)
@@ -105,6 +117,7 @@ class MainActivity : Activity() {
         graph.onSchedule = { sceneView.requestFrame() }
         runtime = rt
         currentPreset = which
+        currentPresetName = preset.manifest.name
 
         sceneView.setScene(rt, SceneRenderer(text, images))
         statsOverlay.bind(
@@ -120,16 +133,58 @@ class MainActivity : Activity() {
     }
 
     private fun showMenu() {
-        val stats = if (statsOverlay.visibility == View.VISIBLE) "Hide stats" else "Show stats"
+        if (tests.isRunning) return
+        val statsLabel = if (statsOverlay.visibility == View.VISIBLE) "Hide stats" else "Show stats"
+        val items = arrayOf(
+            "Demo preset",
+            "Stress test: 300 components",
+            "Blank preset (battery baseline)",
+            "Battery test: idle, ${PowerTests.Kind.IDLE.minutes} min",
+            "Battery test: scrolling, ${PowerTests.Kind.SCROLL.minutes} min",
+            "Battery log",
+            statsLabel,
+        )
         AlertDialog.Builder(this)
             .setTitle("Phase 1 prototype")
-            .setItems(arrayOf("Demo preset", "Stress test: 300 components", stats)) { _, i ->
+            .setItems(items) { _, i ->
                 when (i) {
                     0 -> load(PRESET_DEMO)
                     1 -> load(PRESET_STRESS)
-                    2 -> statsOverlay.visibility = if (statsOverlay.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+                    2 -> load(PRESET_BLANK)
+                    3 -> tests.start(PowerTests.Kind.IDLE)
+                    4 -> tests.start(PowerTests.Kind.SCROLL)
+                    5 -> showBatteryLog()
+                    6 -> statsOverlay.visibility = if (statsOverlay.visibility == View.VISIBLE) View.GONE else View.VISIBLE
                 }
             }
+            .show()
+    }
+
+    /** Totals from the whole log: time on screen, time hidden, and whether anything ran hidden. */
+    private fun showBatteryLog() {
+        monitor.sample()
+        val samples = monitor.log.samples
+        val lines = buildList {
+            add("${samples.size} samples since the log was last cleared.")
+            add("")
+            add("ON SCREEN")
+            EnergyLog.summarize(samples, visible = true)?.let { addAll(it.describe()) } ?: add("No data yet.")
+            add("")
+            add("HIDDEN")
+            add(EnergyLog.background(samples).describe())
+            EnergyLog.summarize(samples, visible = false)?.batteryPercentPerHour?.let {
+                add("Battery while hidden: ${String.format(java.util.Locale.US, "%.1f", it)}%/hour (whole phone)")
+            }
+        }
+        val text = lines.joinToString("\n")
+        AlertDialog.Builder(this)
+            .setTitle("Battery log")
+            .setMessage(text)
+            .setPositiveButton("Close", null)
+            .setNeutralButton("Share") { _, _ ->
+                PowerTests.share(this, "Make-A-Launcher battery log", text + "\n\n" + monitor.log.toCsv(last = SHARE_SAMPLES))
+            }
+            .setNegativeButton("Clear") { _, _ -> monitor.clear() }
             .show()
     }
 
@@ -138,5 +193,7 @@ class MainActivity : Activity() {
         const val KEY_PRESET = "preset"
         const val PRESET_DEMO = "demo"
         const val PRESET_STRESS = "stress"
+        const val PRESET_BLANK = "blank"
+        const val SHARE_SAMPLES = 2000
     }
 }

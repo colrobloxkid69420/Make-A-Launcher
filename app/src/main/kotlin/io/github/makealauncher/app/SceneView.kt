@@ -14,8 +14,10 @@ import android.view.ViewConfiguration
 import android.view.animation.DecelerateInterpolator
 import android.widget.OverScroller
 import io.github.makealauncher.core.runtime.SceneRuntime
+import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.ceil
+import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.roundToInt
 
@@ -43,6 +45,29 @@ class SceneView(context: Context) : View(context), Choreographer.FrameCallback {
         private set
 
     var onLongPress: (() -> Unit)? = null
+
+    /**
+     * False while the app is off screen. No frames run then, even if something asks for one;
+     * pending work catches up in the first frame after becoming active again.
+     */
+    var active = true
+        set(value) {
+            field = value
+            if (value) requestFrame() else {
+                choreographer.removeFrameCallback(this)
+                frameRequested = false
+            }
+        }
+
+    /** Scrolls back and forth through all pages by itself, for repeatable tests. */
+    var autoScroll = false
+        set(value) {
+            field = value
+            autoScrollStart = 0L
+            if (!value) runtime?.let { settle(0f, it.pages) }
+            requestFrame()
+        }
+    private var autoScrollStart = 0L
 
     // ---- scrolling state -----------------------------------------------------------------
     private val config = ViewConfiguration.get(context)
@@ -81,7 +106,7 @@ class SceneView(context: Context) : View(context), Choreographer.FrameCallback {
     }
 
     fun requestFrame() {
-        if (!frameRequested && isAttachedToWindow) {
+        if (active && !frameRequested && isAttachedToWindow) {
             frameRequested = true
             choreographer.postFrameCallback(this)
         }
@@ -114,10 +139,19 @@ class SceneView(context: Context) : View(context), Choreographer.FrameCallback {
         if (width == 0) return
         val flinging = scroller.computeScrollOffset()
         if (flinging) scrollPx = scroller.currX.toFloat()
+        if (autoScroll) {
+            if (autoScrollStart == 0L) autoScrollStart = frameTimeNanos
+            val seconds = (frameTimeNanos - autoScrollStart) / 1e9
+            val span = (rt.pages - 1).coerceAtLeast(0)
+            val period = AUTO_SCROLL_SECONDS_PER_PAGE * 2 * span.coerceAtLeast(1)
+            val position = span * (0.5 - 0.5 * cos(2 * PI * seconds / period))
+            scrollPx = (position * width).toFloat()
+        }
         rt.setScroll(scrollPx / width)
 
         if (rt.needsUpdate) {
             val t0 = System.nanoTime()
+            val bindingsBefore = rt.stats.bindingRuns
             if (rt.update()) {
                 r.apply(rt)
                 invalidate()
@@ -125,8 +159,12 @@ class SceneView(context: Context) : View(context), Choreographer.FrameCallback {
             lastWorkNanos = System.nanoTime() - t0
             totalWorkNanos += lastWorkNanos
             workFrames++
+            EnergyCounters.engineUpdates++
+            EnergyCounters.bindingRuns += rt.stats.bindingRuns - bindingsBefore
+            EnergyCounters.redraws += rt.contentChanged.size
+            EnergyCounters.moves += rt.transformChanged.size
         }
-        if (flinging || !scroller.isFinished || rt.needsUpdate) requestFrame()
+        if (autoScroll || flinging || !scroller.isFinished || rt.needsUpdate) requestFrame()
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -192,5 +230,9 @@ class SceneView(context: Context) : View(context), Choreographer.FrameCallback {
         val duration = (220 + abs(dx) * 120 / w.coerceAtLeast(1f)).toInt().coerceAtMost(420)
         scroller.startScroll(scrollPx.roundToInt(), 0, dx, 0, duration)
         requestFrame()
+    }
+
+    private companion object {
+        const val AUTO_SCROLL_SECONDS_PER_PAGE = 1.5
     }
 }
