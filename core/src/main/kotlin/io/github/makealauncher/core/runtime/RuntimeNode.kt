@@ -63,7 +63,7 @@ class RuntimeNode internal constructor(
     /** Final values the renderer applies as RenderNode properties. */
     val drawX: Float get() = left + pageShift + animTx
     val drawY: Float get() = top + animTy
-    val drawAlpha: Float get() = if (visible) (alpha * animAlpha).coerceIn(0f, 1f) else 0f
+    val drawAlpha: Float get() = if (visible && !paused) (alpha * animAlpha).coerceIn(0f, 1f) else 0f
     val drawScale: Float get() = scale * animScale
     val drawRotation: Float get() = rotation + animRotation
 
@@ -77,7 +77,10 @@ class RuntimeNode internal constructor(
     /** Bindings of this node; paused together when its page is off screen. */
     internal val effects = ArrayList<io.github.makealauncher.core.reactive.Effect>()
 
-    /** True for a paged layer that's off screen: its bindings are paused. */
+    /**
+     * True for a paged layer that's off screen and asleep: its bindings are paused and it isn't
+     * moved or drawn (its alpha is 0, so Android skips it and everything inside it).
+     */
     var paused = false; internal set
 
     /** Moves on every scroll frame (paged or scroll-animated). */
@@ -105,6 +108,9 @@ class RuntimeNode internal constructor(
 
     /** Platform object for the cached layer, when [layerBounds] is set. */
     var platformLayer: Any? = null
+
+    /** Platform bookkeeping, e.g. the transform values last sent to the renderer. */
+    var platformState: Any? = null
 
     /** Platform cache filled while measuring and reused for drawing (e.g. a StaticLayout). */
     var measureCache: Any? = null

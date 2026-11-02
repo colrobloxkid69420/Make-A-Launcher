@@ -98,6 +98,7 @@ class MainActivity : Activity() {
         var assetsDir: PresetAssets? = null
         val files: PresetFiles = when (which) {
             PRESET_STRESS -> StressPreset.files(count = 300, pages = 3)
+            PRESET_STRESS_TYPICAL -> StressPreset.files(count = 300, pages = 3, animateEvery = 10)
             PRESET_BLANK -> BuiltInPresets.blank()
             else -> PresetAssets(assets, "presets/demo").also { assetsDir = it }
         }
@@ -143,7 +144,8 @@ class MainActivity : Activity() {
         val statsLabel = if (statsOverlay.visibility == View.VISIBLE) "Hide stats" else "Show stats"
         val items = arrayOf(
             "Demo preset",
-            "Stress test: 300 components",
+            "Stress test: 300 components, all animated",
+            "Stress test: 300 components, typical",
             "Blank preset (battery baseline)",
             "Battery test: idle, ${PowerTests.Kind.IDLE.minutes} min",
             "Battery test: scrolling, ${PowerTests.Kind.SCROLL.minutes} min",
@@ -157,12 +159,13 @@ class MainActivity : Activity() {
                 when (i) {
                     0 -> load(PRESET_DEMO)
                     1 -> load(PRESET_STRESS)
-                    2 -> load(PRESET_BLANK)
-                    3 -> tests.start(PowerTests.Kind.IDLE)
-                    4 -> tests.start(PowerTests.Kind.SCROLL)
-                    5 -> showBatteryLog()
-                    6 -> showSettings()
-                    7 -> statsOverlay.visibility = if (statsOverlay.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+                    2 -> load(PRESET_STRESS_TYPICAL)
+                    3 -> load(PRESET_BLANK)
+                    4 -> tests.start(PowerTests.Kind.IDLE)
+                    5 -> tests.start(PowerTests.Kind.SCROLL)
+                    6 -> showBatteryLog()
+                    7 -> showSettings()
+                    8 -> statsOverlay.visibility = if (statsOverlay.visibility == View.VISIBLE) View.GONE else View.VISIBLE
                 }
             }
             .show()
@@ -226,6 +229,7 @@ class MainActivity : Activity() {
         const val KEY_PRESET = "preset"
         const val PRESET_DEMO = "demo"
         const val PRESET_STRESS = "stress"
+        const val PRESET_STRESS_TYPICAL = "stress-typical"
         const val PRESET_BLANK = "blank"
         const val SHARE_SAMPLES = 2000
     }

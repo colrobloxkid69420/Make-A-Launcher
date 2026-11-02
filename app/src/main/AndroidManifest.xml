@@ -9,6 +9,9 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.MakeALauncher">
 
+        <!-- Lets system tools (Perfetto, Android Studio's profiler) trace optimized builds too. -->
+        <profileable android:shell="true" />
+
         <!-- Phase 1 runs as a normal app. Phase 2 adds the HOME category so it can be the launcher. -->
         <activity
             android:name=".MainActivity"

@@ -9,14 +9,16 @@ or in any text editor, and the engine is built so that big presets stay fast.
 
 ## Try it
 
-- **Download:** open the latest run of the [Build workflow](../../actions/workflows/build.yml),
-  then download `make-a-launcher-debug-apk` under *Artifacts*. Unzip it and install the APK
-  (Android 12 or newer).
+- **Download:** open the latest run of the [Build workflow](../../actions/workflows/build.yml)
+  and download an APK under *Artifacts*, unzip it and install it (Android 12 or newer):
+  - `make-a-launcher-fast-apk`: optimized like a release build. **Use this one for performance
+    and battery tests**; it installs next to the debug build as "Make-A-Launcher (fast)".
+  - `make-a-launcher-debug-apk`: the debug build, which runs noticeably slower.
 - **Build it yourself:** `./gradlew :app:assembleDebug` with JDK 17+ and the Android SDK,
   or open the project in Android Studio.
 
-Swipe between the three pages. **Long-press** anywhere to switch to the 300-component stress
-test or to hide the stats overlay.
+Swipe between the three pages. **Long-press** anywhere for the menu: the 300-component stress
+tests (every item animated, or a typical one where 1 in 10 is), battery tests, and settings.
 
 ## What Phase 1 proves
 
@@ -54,7 +56,8 @@ Phone current includes the screen, which usually dominates, so compare like with
    checking. The difference is what the preset costs.
 3. Run the scrolling test the same way for the cost of animation.
 4. To see what an optimization is worth, run the same test with it on and off in
-   **Engine settings**. Each result lists which settings were on.
+   **Engine settings**. Each result lists the build, the display rate and which settings were on.
+5. Unplug the phone: while charging, the current and drain figures can't be used.
 
 Some phones don't report current or report it coarsely; CPU % and wakeups are reliable on
 every phone. To compare with another launcher or KLWP over a whole day, use Android's own
@@ -81,9 +84,9 @@ Scroll / touch ──▶ Native animator ─────────────
 - **GPU layer caching.** Moving layers that are expensive to draw (groups, large or long text)
   are rendered once into a GPU texture; scrolling then only moves, fades and scales that texture.
   Single-paint layers fade without an offscreen buffer. Layer memory is capped at two screens.
-- **Off-screen pages pause.** Bindings on a page that's fully off screen stop listening, and
-  catch up in the frame the page comes back into view. A seconds display on another page doesn't
-  keep a timer running.
+- **Off-screen pages sleep.** Layers on a page that's fully off screen stop listening for data,
+  aren't moved and aren't drawn; they catch up in the frame the page comes back into view. A
+  seconds display on another page doesn't keep a timer running.
 - **Sleep hard.** When the app isn't visible, every timer and listener stops. A seconds timer
   runs only while something on screen shows seconds.
 

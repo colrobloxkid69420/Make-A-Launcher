@@ -20,7 +20,19 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+        // Release speed (R8-optimized, not debuggable) for measuring performance and battery:
+        // debug builds run noticeably slower. Signed with the debug key so anyone can install it,
+        // and given its own app ID so it installs next to the debug build.
+        create("benchmark") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release")
+            isDebuggable = false
+            applicationIdSuffix = ".benchmark"
+            versionNameSuffix = "-benchmark"
         }
     }
 

@@ -56,6 +56,7 @@ class SceneRenderer(private val text: TextLayouts, private val images: Images) {
             (n.platformLayer as? RenderNode)?.discardDisplayList()
             n.platform = null
             n.platformLayer = null
+            n.platformState = null
         }
     }
 
@@ -65,20 +66,59 @@ class SceneRenderer(private val text: TextLayouts, private val images: Images) {
             n.platform = it
         }
 
+    /** The values last sent to a node's RenderNode, so unchanged ones aren't sent again. */
+    private class Applied {
+        var w = -1
+        var h = -1
+        var x = Float.NaN
+        var y = Float.NaN
+        var alpha = Float.NaN
+        var scale = Float.NaN
+        var rotation = Float.NaN
+    }
+
+    /**
+     * Pushes a node's transform. Each setter is a call into native code, and while scrolling
+     * most nodes change only one or two values, so only the changed ones are sent.
+     */
     private fun applyTransform(n: RuntimeNode) {
         val r = renderNode(n)
+        val a = n.platformState as? Applied ?: Applied().also { n.platformState = it }
         val w = ceil(n.width).toInt()
         val h = ceil(n.height).toInt()
-        r.setPosition(0, 0, w, h)
-        r.setTranslationX(n.drawX)
-        r.setTranslationY(n.drawY)
-        r.setAlpha(n.drawAlpha)
+        if (w != a.w || h != a.h) {
+            r.setPosition(0, 0, w, h)
+            r.setPivotX(w / 2f)
+            r.setPivotY(h / 2f)
+            a.w = w
+            a.h = h
+        }
+        val x = n.drawX
+        if (x != a.x) {
+            r.setTranslationX(x)
+            a.x = x
+        }
+        val y = n.drawY
+        if (y != a.y) {
+            r.setTranslationY(y)
+            a.y = y
+        }
+        val alpha = n.drawAlpha
+        if (alpha != a.alpha) {
+            r.setAlpha(alpha)
+            a.alpha = alpha
+        }
         val s = n.drawScale
-        r.setScaleX(s)
-        r.setScaleY(s)
-        r.setRotationZ(n.drawRotation)
-        r.setPivotX(w / 2f)
-        r.setPivotY(h / 2f)
+        if (s != a.scale) {
+            r.setScaleX(s)
+            r.setScaleY(s)
+            a.scale = s
+        }
+        val rot = n.drawRotation
+        if (rot != a.rotation) {
+            r.setRotationZ(rot)
+            a.rotation = rot
+        }
     }
 
     private fun record(n: RuntimeNode, runtime: SceneRuntime) {

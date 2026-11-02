@@ -116,6 +116,7 @@ class SceneRuntimeTest {
         val card = rt.node("page1-card")!!
         assertEquals(200f, card.width)
         assertEquals(1000f, card.drawX, "page 1 starts one screen to the right")
+        assertEquals(0f, card.drawAlpha, "asleep while off screen, so it isn't drawn")
     }
 
     @Test
@@ -217,6 +218,82 @@ class SceneRuntimeTest {
         assertTrue(redrawn.containsAll(setOf("header-clock", "item-201", "item-251")), redrawn.toString())
         assertTrue(redrawn.none { it == "item-1" || it == "item-51" }, redrawn.toString())
         assertTrue(redrawn.size <= 7, redrawn.toString())
+    }
+
+    @Test
+    fun sleepingPagesArentMovedAndWakeWithTheRightPosition() {
+        val result = PresetLoader.load(StressPreset.files(count = 300, pages = 3))
+        val graph = Graph()
+        val rt = SceneRuntime(result.preset!!, graph, DataSources(graph), FakeMeasurer(), density = 3f)
+        rt.setViewport(1080f, 2400f)
+        rt.update()
+        val page3 = (200 until 300).map { "item-$it" }.toSet()
+        assertTrue(page3.all { rt.node(it)!!.paused })
+
+        rt.setScroll(0.2f)
+        rt.update()
+        val moved = rt.transformChanged.map { it.id }.toSet()
+        assertTrue(moved.none { it in page3 }, "page 3 is asleep and mustn't be moved")
+        assertTrue(moved.size < 210, "only pages 1 and 2 move, got ${moved.size}")
+
+        rt.setScroll(1.5f)
+        rt.update()
+        val item = rt.node("item-250")!!
+        assertFalse(item.paused)
+        assertTrue(item in rt.transformChanged)
+        assertEquals((2 - 1.5f) * 1080f, item.pageShift)
+        assertTrue(item.drawAlpha > 0f)
+    }
+
+    @Test
+    fun sleepCheckUsesWhatALayerActuallyPaints() {
+        val rig = Rig(
+            """
+            pages: 3
+            layers:
+              - id: page-2-background
+                type: group
+                page: 1
+                width: 500
+                height: 1000
+                children:
+                  - id: bg
+                    type: shape
+                    width: 500
+                    height: 1000
+              - id: page-3-card
+                type: group
+                page: 2
+                width: 100
+                height: 100
+                children:
+                  - id: sticks-out
+                    type: shape
+                    width: 100
+                    height: 100
+                    offset: [-400, 0]
+            """.trimIndent(),
+        )
+        val rt = rig.runtime
+        rt.update()
+        // A full-screen group on the next page touches the screen edge but isn't on it.
+        assertTrue(rt.node("page-2-background")!!.paused)
+        assertTrue(rt.node("page-3-card")!!.paused)
+        // On page 2 this group's own box is still off screen to the right, but its child
+        // reaches back 800 px onto the screen, so it must be awake.
+        rt.setScroll(1f)
+        rt.update()
+        val card = rt.node("page-3-card")!!
+        assertTrue(card.left + card.pageShift >= 1000f, "the group's own box is off screen")
+        assertFalse(card.paused)
+    }
+
+    @Test
+    fun typicalStressPresetAnimatesOnlySomeItems() {
+        val result = PresetLoader.load(StressPreset.files(count = 300, pages = 3, animateEvery = 10))
+        assertEquals(emptyList(), result.errors.map { it.toString() })
+        val animated = result.preset!!.scene.layers.count { it.animations.isNotEmpty() }
+        assertEquals(30, animated)
     }
 
     private val pagedScene = """

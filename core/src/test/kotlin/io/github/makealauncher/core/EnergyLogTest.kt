@@ -150,4 +150,24 @@ class EnergyLogTest {
         assertEquals(325L, io.github.makealauncher.core.energy.ProcStat.cpuTicks(line))
         assertNull(io.github.makealauncher.core.energy.ProcStat.cpuTicks("garbage"))
     }
+
+    @Test
+    fun threadGroupsAndBusiestThreads() {
+        val ps = io.github.makealauncher.core.energy.ProcStat
+        assertEquals("Jit thread pool", ps.threadName("77 (Jit thread pool) S 1 2 3"))
+        assertEquals("binder", ps.groupName("binder:1234_5"))
+        assertEquals("hwuiTask", ps.groupName("hwuiTask1"))
+        assertEquals("RenderThread", ps.groupName("RenderThread"))
+        val before = mapOf(1 to ("main" to 100L), 2 to ("binder:9_1" to 10L), 3 to ("Jit thread pool" to 50L))
+        val after = mapOf(
+            1 to ("main" to 900L),
+            2 to ("binder:9_1" to 30L),
+            3 to ("Jit thread pool" to 450L),
+            4 to ("binder:9_2" to 25L), // started during the test
+        )
+        assertEquals(
+            listOf("Jit thread pool" to 400L, "binder" to 45L),
+            ps.busiestGroups(before, after, exclude = setOf(1)),
+        )
+    }
 }

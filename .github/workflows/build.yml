@@ -20,14 +20,21 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v6
 
-      - name: Test engine core and build debug APK
-        run: ./gradlew --no-daemon --stacktrace :core:test :app:assembleDebug
+      - name: Test engine core and build debug and optimized APKs
+        run: ./gradlew --no-daemon --stacktrace :core:test :app:assembleDebug :app:assembleBenchmark
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v7
         with:
           name: make-a-launcher-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload optimized APK (use this one for performance and battery tests)
+        uses: actions/upload-artifact@v7
+        with:
+          name: make-a-launcher-fast-apk
+          path: app/build/outputs/apk/benchmark/*.apk
           if-no-files-found: error
 
       - name: Upload test reports

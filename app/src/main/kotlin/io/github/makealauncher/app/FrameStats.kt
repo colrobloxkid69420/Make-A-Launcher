@@ -109,6 +109,34 @@ class ThreadCpu {
         }
     }
 
+    /** Every thread of this process: id → (name, CPU ms). Used to find what else is busy. */
+    fun snapshot(): Map<Int, Pair<String, Long>> {
+        val out = HashMap<Int, Pair<String, Long>>()
+        val dirs = try {
+            File("/proc/self/task").listFiles()
+        } catch (e: Exception) {
+            null
+        } ?: return out
+        for (dir in dirs) {
+            val tid = dir.name.toIntOrNull() ?: continue
+            try {
+                val stat = File(dir, "stat").readText()
+                val name = ProcStat.threadName(stat) ?: continue
+                val ticks = ProcStat.cpuTicks(stat) ?: continue
+                out[tid] = name to ticks * 1000 / ticksPerSecond
+            } catch (e: Exception) {
+                // The thread may have ended; skip it.
+            }
+        }
+        return out
+    }
+
+    /** Thread ids of the main and render threads, which results report separately. */
+    fun mainAndRenderTids(): Set<Int> {
+        if (renderTid < 0) renderTid = findThread("RenderThread")
+        return setOf(mainTid, renderTid)
+    }
+
     private fun readMs(tid: Int): Long? = try {
         File("/proc/self/task/$tid/stat").readText().let(ProcStat::cpuTicks)?.let { it * 1000 / ticksPerSecond }
     } catch (e: Exception) {

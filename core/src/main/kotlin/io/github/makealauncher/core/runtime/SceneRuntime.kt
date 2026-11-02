@@ -28,9 +28,9 @@ import kotlin.math.sin
  * - layout runs only when a size or offset changed;
  * - a scroll change touches only nodes that are paged or scroll-animated, and only their
  *   transforms. No binding runs during a scroll;
- * - layers on pages that are off screen are paused: their bindings stop listening (so, for
- *   example, a seconds display on another page doesn't keep a timer running) and catch up
- *   in the frame they come back into view;
+ * - layers on pages that are off screen sleep: their bindings stop listening (so, for
+ *   example, a seconds display on another page doesn't keep a timer running), they aren't
+ *   moved or drawn, and they catch up in the frame they come back into view;
  * - moving layers that are expensive to draw get a GPU layer ([RuntimeNode.layerBounds]), so
  *   scrolling composites a cached texture instead of redrawing them.
  */
@@ -54,10 +54,15 @@ class SceneRuntime(
     private val byId = HashMap<String, RuntimeNode>()
     private val scrollNodes: Array<RuntimeNode>
     private val scrollAnims: Array<Array<CompiledAnim>>
+    /** For each scroll node, its top-level ancestor (or itself), whose sleep state it shares. */
+    private val scrollRoots: Array<RuntimeNode>
     private val pagedRoots: Array<RuntimeNode>
     /** Per paged root: the most it can move sideways (px) and grow (factor) from animations. */
     private val pagedReachX: FloatArray
     private val pagedMaxScale: FloatArray
+    private val pagedRotates: BooleanArray
+    /** Per paged root: the box its content paints in, relative to its top-left (set by layout). */
+    private val pagedExtent: Array<FloatArray>
 
     /** Background colour of the root, or null. */
     var background: Int? = null; private set
@@ -109,6 +114,11 @@ class SceneRuntime(
         nodes = all
         scrollNodes = all.filter { n -> n.spec != null && (n.spec.page != null || n.spec.animations.isNotEmpty()) }.toTypedArray()
         for (n in scrollNodes) n.scrollDriven = true
+        scrollRoots = Array(scrollNodes.size) { i ->
+            var r = scrollNodes[i]
+            while (r.parent != null && r.parent !== root) r = r.parent!!
+            r
+        }
         scrollAnims = Array(scrollNodes.size) { i ->
             scrollNodes[i].spec!!.animations.map { a ->
                 val entries = a.tracks.entries.toList()
@@ -131,6 +141,10 @@ class SceneRuntime(
                 acc * max(1f, a.tracks[AnimProperty.SCALE]?.maxOf { abs(it) } ?: 1f)
             }
         }
+        pagedRotates = BooleanArray(pagedRoots.size) { i ->
+            pagedRoots[i].spec!!.animations.any { a -> a.tracks[AnimProperty.ROTATION]?.any { it != 0f } == true }
+        }
+        pagedExtent = Array(pagedRoots.size) { FloatArray(4) }
         preset.scene.background?.let { v -> bind(root, v, "background") { c -> if (background != c) { background = c; markContent(root) } } }
         for (n in all) {
             markContent(n)
@@ -346,6 +360,16 @@ class SceneRuntime(
             markTransform(root)
         }
         for (child in root.children) layout(child, root.width, root.height)
+        for (i in pagedRoots.indices) {
+            val n = pagedRoots[i]
+            val b = pagedExtent[i]
+            b[0] = 0f
+            b[1] = 0f
+            b[2] = n.width
+            b[3] = n.height
+            expandForContent(n, 0f, 0f, b)
+            for (c in n.children) unionDescendant(c, 0f, 0f, b)
+        }
         pagingDirty = true
         layerPlanDirty = true
     }
@@ -437,7 +461,8 @@ class SceneRuntime(
                 n.animAlpha = a
                 n.animScale = s
                 n.animRotation = r
-                markTransform(n)
+                // Values stay current while asleep, but the renderer only hears about awake layers.
+                if (!scrollRoots[i].paused) markTransform(n)
             }
         }
     }
@@ -452,33 +477,60 @@ class SceneRuntime(
     // ---- paging --------------------------------------------------------------------------
 
     /**
-     * Pauses paged layers that are fully off screen and resumes those that came back.
+     * Puts paged layers that are fully off screen to sleep and wakes those that came back.
      * Visibility uses a circle around the layer that covers any rotation, scaling and sideways
-     * animation, so a layer is never paused while any part of it could be showing.
-     * Returns true if anything was resumed.
+     * animation, so a layer never sleeps while any part of it could be showing.
+     *
+     * A sleeping layer's bindings are paused, it gets alpha 0 (Android skips drawing it and
+     * everything inside it), and its scroll transforms aren't sent to the renderer.
+     * Returns true if anything woke up.
      */
     private fun updatePaging(): Boolean {
-        var resumed = false
+        var woke = false
         for (i in pagedRoots.indices) {
             val n = pagedRoots[i]
             val off = pauseOffscreen && viewportWidth > 0f && isOffscreen(n, i)
             if (off == n.paused) continue
             n.paused = off
-            if (off) {
-                setPausedRecursive(n, true)
-            } else {
-                setPausedRecursive(n, false)
-                resumed = true
+            setPausedRecursive(n, off)
+            markTransform(n)
+            if (!off) {
+                // Push the transforms it skipped while asleep.
+                markScrollDrivenRecursive(n)
+                woke = true
             }
         }
-        return resumed
+        return woke
     }
 
+    private fun markScrollDrivenRecursive(n: RuntimeNode) {
+        if (n.scrollDriven) markTransform(n)
+        for (c in n.children) markScrollDrivenRecursive(c)
+    }
+
+    /**
+     * True when nothing the layer paints can be on screen: its content box (including children
+     * and text overhang), grown by its largest scale, swept by any rotation, and widened by
+     * how far its animations can move it sideways.
+     */
     private fun isOffscreen(n: RuntimeNode, i: Int): Boolean {
+        val b = pagedExtent[i]
         val scale = max(1f, abs(n.scale)) * pagedMaxScale[i]
-        val radius = hypot(n.width, n.height) / 2f * scale + pagedReachX[i]
-        val cx = n.left + n.pageShift + n.width / 2f
-        return cx + radius < 0f || cx - radius > viewportWidth
+        val cx = n.width / 2f
+        val lo: Float
+        val hi: Float
+        if (pagedRotates[i] || n.rotation != 0f) {
+            val cy = n.height / 2f
+            val r = hypot(max(abs(b[0] - cx), abs(b[2] - cx)), max(abs(b[1] - cy), abs(b[3] - cy))) * scale
+            lo = cx - r
+            hi = cx + r
+        } else {
+            lo = cx + (b[0] - cx) * scale
+            hi = cx + (b[2] - cx) * scale
+        }
+        val x = n.left + n.pageShift
+        val reach = pagedReachX[i]
+        return x + hi + reach <= 0f || x + lo - reach >= viewportWidth
     }
 
     private fun setPausedRecursive(n: RuntimeNode, pause: Boolean) {

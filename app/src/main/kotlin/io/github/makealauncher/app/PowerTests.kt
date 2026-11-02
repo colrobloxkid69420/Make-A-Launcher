@@ -9,6 +9,7 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.Toast
 import io.github.makealauncher.core.energy.EnergyLog
+import io.github.makealauncher.core.energy.ProcStat
 import java.util.Locale
 
 /**
@@ -45,6 +46,7 @@ class PowerTests(
         val settings: String,
         val workNanosAtStart: Long,
         val workFramesAtStart: Long,
+        val threadsAtStart: Map<Int, Pair<String, Long>>,
     )
 
     private val handler = Handler(Looper.getMainLooper())
@@ -57,7 +59,10 @@ class PowerTests(
     fun start(kind: Kind) {
         if (running != null) return
         val first = monitor.sample()
-        running = Running(kind, first.timeMs, presetName(), overlay.visibility, settings(), scene.totalWorkNanos, scene.workFrames)
+        running = Running(
+            kind, first.timeMs, presetName(), overlay.visibility, settings(),
+            scene.totalWorkNanos, scene.workFrames, monitor.threads.snapshot(),
+        )
         activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         overlay.visibility = View.GONE
         monitor.intervalMs = TEST_INTERVAL_MS
@@ -87,12 +92,14 @@ class PowerTests(
         val p95 = frames.recentPercentileMs(95)
         val workFrames = scene.workFrames - r.workFramesAtStart
         val engineMs = if (workFrames > 0) (scene.totalWorkNanos - r.workNanosAtStart) / 1e6 / workFrames else 0.0
+        val busiest = ProcStat.busiestGroups(r.threadsAtStart, monitor.threads.snapshot(), monitor.threads.mainAndRenderTids())
         cleanUp(r)
 
         val window = monitor.log.since(r.startMs)
         val summary = EnergyLog.summarize(window, visible = true)
         val lines = buildList {
             add("${r.kind.label} · ${r.preset}")
+            add("Build: ${buildLabel()} · display ${displayLabel()}")
             add("Settings: ${r.settings}")
             if (summary == null) {
                 add("Not enough samples to summarise.")
@@ -102,6 +109,14 @@ class PowerTests(
                     "Engine: ${String.format(Locale.US, "%.2f", engineMs)} ms per updated frame · " +
                         "recent frame p95 ${String.format(Locale.US, "%.1f", p95)} ms",
                 )
+                val seconds = summary.seconds
+                if (busiest.isNotEmpty() && seconds > 0) {
+                    add(
+                        "Other threads: " + busiest.take(4).joinToString(", ") { (name, ms) ->
+                            "$name ${String.format(Locale.US, "%.1f", ms / 10.0 / seconds)}%"
+                        },
+                    )
+                }
             }
             if (window.any { it.charging }) add("Note: the phone was charging, so drain figures are incomplete.")
         }
@@ -114,6 +129,17 @@ class PowerTests(
                 share(activity, "Make-A-Launcher ${r.kind.label}", text + "\n\n" + csv(window))
             }
             .show()
+    }
+
+    private fun buildLabel(): String =
+        if (BuildConfig.DEBUG) "debug (slower; use the fast build for measurements)" else "fast (${BuildConfig.BUILD_TYPE})"
+
+    /** The current refresh rate and the highest the screen supports, e.g. "60 Hz (up to 120 Hz)". */
+    private fun displayLabel(): String {
+        val d = activity.display ?: return "unknown"
+        val now = d.refreshRate.toInt()
+        val max = d.supportedModes.maxOfOrNull { it.refreshRate }?.toInt() ?: now
+        return if (max > now) "$now Hz (up to $max Hz)" else "$now Hz"
     }
 
     private fun cleanUp(r: Running) {

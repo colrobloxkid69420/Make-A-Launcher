@@ -17,4 +17,39 @@ object ProcStat {
         val stime = fields[12].toLongOrNull() ?: return null
         return utime + stime
     }
+
+    /** The thread name from a stat line, or null. */
+    fun threadName(stat: String): String? {
+        val open = stat.indexOf('(')
+        val close = stat.lastIndexOf(')')
+        if (open < 0 || close <= open) return null
+        return stat.substring(open + 1, close)
+    }
+
+    /**
+     * Groups numbered threads of the same kind, e.g. "binder:1234_2" and "binder:1234_5" →
+     * "binder", "hwuiTask1" → "hwuiTask".
+     */
+    fun groupName(name: String): String =
+        name.substringBefore(':').trimEnd { it.isDigit() || it == '_' || it == '-' || it == ' ' }.ifEmpty { name }
+
+    /**
+     * CPU used by each thread group between two snapshots (thread id → name and ms), largest
+     * first. Threads that started after [before] count from zero.
+     */
+    fun busiestGroups(
+        before: Map<Int, Pair<String, Long>>,
+        after: Map<Int, Pair<String, Long>>,
+        exclude: Set<Int> = emptySet(),
+    ): List<Pair<String, Long>> {
+        val totals = HashMap<String, Long>()
+        for ((tid, now) in after) {
+            if (tid in exclude) continue
+            val used = now.second - (before[tid]?.second ?: 0L)
+            if (used <= 0) continue
+            val group = groupName(now.first)
+            totals[group] = (totals[group] ?: 0L) + used
+        }
+        return totals.entries.sortedByDescending { it.value }.map { it.key to it.value }
+    }
 }
