@@ -46,6 +46,17 @@ class AndroidDataSources(private val context: Context, private val data: DataSou
         }
     }
 
+    init {
+        // Start or stop the seconds timer as soon as a seconds display appears or disappears,
+        // e.g. when its page scrolls into or out of view.
+        data.time.onSecondsNeededChanged = { needed ->
+            if (running) {
+                if (needed) data.time.onSecond()
+                updateSecondTicker()
+            }
+        }
+    }
+
     fun start() {
         if (running) return
         running = true

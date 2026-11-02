@@ -7,6 +7,10 @@ package io.github.makealauncher.core.reactive
  * Dependencies are recorded automatically while an effect runs, so a binding that shows
  * `{battery.level}` never wakes up for a clock tick. Everything is single-threaded
  * (the UI thread on Android); changes queue effects and [flush] runs them once per frame.
+ *
+ * Effects can be paused (their layer is off screen): they stop listening, and on resume they
+ * re-run only if something they read changed in the meantime. A source knows whether anyone
+ * is listening ([Dependency.onActiveChanged]), so data that nobody shows can stop updating.
  */
 class Graph {
     internal var current: Observer? = null
@@ -45,7 +49,7 @@ class Graph {
         while (queue.isNotEmpty()) {
             val e = queue.first()
             queue.remove(e)
-            if (e.disposed) continue
+            if (e.disposed || e.paused) continue
             e.execute()
             ran++
             check(ran < MAX_RUNS_PER_FLUSH) {
@@ -60,6 +64,9 @@ class Graph {
         queue += e
         if (wasEmpty) onSchedule?.invoke()
     }
+
+    /** Removes [e] from the queue; returns true if it was waiting to run. */
+    internal fun unschedule(e: Effect): Boolean = queue.remove(e)
 
     private companion object {
         const val MAX_RUNS_PER_FLUSH = 100_000
@@ -79,9 +86,28 @@ abstract class Dependency internal constructor(internal val graph: Graph) {
 
     val observerCount: Int get() = observers.size
 
+    /** Increases whenever the value may have changed; paused effects compare it on resume. */
+    var version: Long = 0
+        internal set
+
+    /**
+     * Called with true when the first observer starts listening and false when the last one
+     * stops. Data sources use it to run only while someone shows their data.
+     */
+    var onActiveChanged: ((Boolean) -> Unit)? = null
+
     protected fun track() {
         val o = graph.current ?: return
-        if (observers.add(o)) o.deps.add(this)
+        val collecting = o.collecting ?: return
+        if (collecting.add(this)) addObserver(o)
+    }
+
+    internal fun addObserver(o: Observer) {
+        if (observers.add(o) && observers.size == 1) onActiveChanged?.invoke(true)
+    }
+
+    internal fun removeObserver(o: Observer) {
+        if (observers.remove(o) && observers.isEmpty()) onActiveChanged?.invoke(false)
     }
 
     protected fun notifyObservers() {
@@ -90,14 +116,36 @@ abstract class Dependency internal constructor(internal val graph: Graph) {
     }
 }
 
-internal interface Observer {
-    val deps: MutableSet<Dependency>
-    fun onDependencyChanged()
-}
+/**
+ * Something that reads dependencies. Tracking is diff-based: a re-run keeps the subscriptions
+ * it still uses and drops only the ones it stopped using, so a dependency that's read on every
+ * run never flips between active and inactive.
+ */
+internal abstract class Observer {
+    var deps: LinkedHashSet<Dependency> = LinkedHashSet()
+    private var spare: LinkedHashSet<Dependency> = LinkedHashSet()
+    var collecting: LinkedHashSet<Dependency>? = null
 
-internal fun Observer.clearDeps() {
-    for (d in deps) d.observers.remove(this)
-    deps.clear()
+    abstract fun onDependencyChanged()
+
+    fun beginTracking() {
+        spare.clear()
+        collecting = spare
+    }
+
+    fun endTracking() {
+        val now = spare
+        for (d in deps) if (d !in now) d.removeObserver(this)
+        spare = deps
+        deps = now
+        collecting = null
+    }
+
+    fun clearDeps() {
+        val old = deps.toTypedArray()
+        deps.clear()
+        for (d in old) d.removeObserver(this)
+    }
 }
 
 class Source<T> internal constructor(graph: Graph, initial: T) : Dependency(graph), Signal<T> {
@@ -115,6 +163,7 @@ class Source<T> internal constructor(graph: Graph, initial: T) : Dependency(grap
     fun set(newValue: T) {
         if (newValue == v) return
         v = newValue
+        version++
         notifyObservers()
     }
 }
@@ -127,12 +176,11 @@ class Computed<T> internal constructor(
     private var stale = true
     private var cached: Any? = null
 
-    private val observer = object : Observer {
-        override val deps = LinkedHashSet<Dependency>()
-
+    private val observer = object : Observer() {
         override fun onDependencyChanged() {
             if (stale) return
             stale = true
+            version++
             notifyObservers()
         }
     }
@@ -148,12 +196,13 @@ class Computed<T> internal constructor(
     @Suppress("UNCHECKED_CAST")
     private fun refresh(): T {
         if (stale) {
-            observer.clearDeps()
             val prev = graph.current
             graph.current = observer
+            observer.beginTracking()
             try {
                 cached = compute()
             } finally {
+                observer.endTracking()
                 graph.current = prev
             }
             stale = false
@@ -169,11 +218,17 @@ class Effect internal constructor(
     var disposed = false
         private set
 
-    private val observer = object : Observer {
-        override val deps = LinkedHashSet<Dependency>()
+    /** A paused effect doesn't listen to anything and never runs until resumed. */
+    var paused = false
+        private set
 
+    private var pausedDeps: Array<Dependency> = EMPTY
+    private var pausedVersions = LongArray(0)
+    private var missedRun = false
+
+    private val observer = object : Observer() {
         override fun onDependencyChanged() {
-            if (!disposed) graph.schedule(this@Effect)
+            if (!disposed && !paused) graph.schedule(this@Effect)
         }
     }
 
@@ -181,19 +236,59 @@ class Effect internal constructor(
     val dependencyCount: Int get() = observer.deps.size
 
     internal fun execute() {
-        observer.clearDeps()
         val prev = graph.current
         graph.current = observer
+        observer.beginTracking()
         try {
             run()
         } finally {
+            observer.endTracking()
             graph.current = prev
             graph.effectRuns++
         }
     }
 
+    /** Stops listening. Cheap; the effect remembers what it read and those values' versions. */
+    fun pause() {
+        if (paused || disposed) return
+        paused = true
+        pausedDeps = observer.deps.toTypedArray()
+        pausedVersions = LongArray(pausedDeps.size) { pausedDeps[it].version }
+        missedRun = graph.unschedule(this)
+        observer.clearDeps()
+    }
+
+    /**
+     * Listens again. Re-runs (on the next [Graph.flush]) only if something it read changed
+     * while it was paused, or if it was waiting to run when it was paused.
+     */
+    fun resume() {
+        if (!paused || disposed) return
+        paused = false
+        val deps = pausedDeps
+        val versions = pausedVersions
+        pausedDeps = EMPTY
+        pausedVersions = LongArray(0)
+        // Subscribe first: becoming active can make a source refresh itself (e.g. the clock),
+        // and that refresh must be seen by the version check below.
+        for (d in deps) {
+            observer.deps.add(d)
+            d.addObserver(observer)
+        }
+        var changed = missedRun
+        missedRun = false
+        for (i in deps.indices) if (deps[i].version != versions[i]) changed = true
+        if (changed) graph.schedule(this)
+    }
+
     fun dispose() {
         disposed = true
+        pausedDeps = EMPTY
         observer.clearDeps()
+        graph.unschedule(this)
+    }
+
+    private companion object {
+        val EMPTY = emptyArray<Dependency>()
     }
 }

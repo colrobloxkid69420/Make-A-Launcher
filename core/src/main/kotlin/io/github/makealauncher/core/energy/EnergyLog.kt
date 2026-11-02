@@ -35,6 +35,14 @@ data class EnergySample(
     val currentMicroAmps: Long?,
     /** Device charge counter in µAh, or null if unsupported. */
     val chargeMicroAh: Long?,
+    /** CPU time of the main (UI) thread, which runs the engine, in ms; null if unreadable. */
+    val uiCpuMs: Long? = null,
+    /** CPU time of Android's render thread, which turns drawings into GPU commands, in ms. */
+    val renderCpuMs: Long? = null,
+    /** GPU time spent on this app's frames, in ms. */
+    val gpuMs: Long? = null,
+    /** Frames that missed Android's frame deadline (what shows up as stutter). */
+    val lateFrames: Long = 0,
 )
 
 data class EnergySummary(
@@ -53,11 +61,24 @@ data class EnergySummary(
     val milliAmpHoursUsed: Double?,
     /** Battery drop per hour while not charging; null if the window is too short to tell. */
     val batteryPercentPerHour: Double?,
+    val uiCpuPercent: Double? = null,
+    val renderCpuPercent: Double? = null,
+    val gpuMsPerFrame: Double? = null,
+    /** Share of frames that missed Android's deadline, 0..100. */
+    val latePercent: Double = 0.0,
 ) {
     fun describe(): List<String> = buildList {
         add("Duration: ${duration(seconds)}")
-        add("CPU: ${f(cpuPercent, 2)}% of one core")
-        add("Frames: ${f(framesPerSecond, 1)}/s · engine updates ${f(engineUpdatesPerSecond, 1)}/s")
+        val split = listOfNotNull(
+            uiCpuPercent?.let { "UI thread ${f(it, 1)}%" },
+            renderCpuPercent?.let { "render thread ${f(it, 1)}%" },
+        )
+        add("CPU: ${f(cpuPercent, 1)}% of one core" + if (split.isEmpty()) "" else " (${split.joinToString(", ")})")
+        add(
+            "Frames: ${f(framesPerSecond, 1)}/s · late ${f(latePercent, 1)}%" +
+                (gpuMsPerFrame?.let { " · GPU ${f(it, 1)} ms/frame" } ?: ""),
+        )
+        add("Engine updates: ${f(engineUpdatesPerSecond, 1)}/s")
         add("Per second: ${f(bindingRunsPerSecond, 1)} bindings · ${f(redrawsPerSecond, 1)} redraws · ${f(movesPerSecond, 0)} moves")
         add("Wakeups: ${f(wakeupsPerMinute, 1)}/min")
         averageCurrentMilliAmps?.let { add("Device current: ${f(it, 0)} mA (whole phone)") }
@@ -107,20 +128,26 @@ class EnergyLog(private val capacity: Int = 5000) {
 
     companion object {
         const val CSV_HEADER =
-            "time_ms,session,visible,cpu_ms,frames,engine_updates,binding_runs,redraws,moves,wakeups,battery_pct,charging,current_ua,charge_uah"
+            "time_ms,session,visible,cpu_ms,frames,engine_updates,binding_runs,redraws,moves,wakeups,battery_pct,charging,current_ua,charge_uah," +
+                "ui_cpu_ms,render_cpu_ms,gpu_ms,late_frames"
 
         fun toCsvLine(s: EnergySample): String = listOf(
             s.timeMs, s.session, if (s.visible) 1 else 0, s.cpuMs, s.frames, s.engineUpdates, s.bindingRuns,
             s.redraws, s.moves, s.wakeups, s.batteryPercent, if (s.charging) 1 else 0,
             s.currentMicroAmps ?: "", s.chargeMicroAh ?: "",
+            s.uiCpuMs ?: "", s.renderCpuMs ?: "", s.gpuMs ?: "", s.lateFrames,
         ).joinToString(",")
 
-        /** Parses lines written by [toCsvLine]; malformed lines are skipped. */
+        /**
+         * Parses lines written by [toCsvLine], including the shorter lines older versions wrote;
+         * malformed lines are skipped.
+         */
         fun fromCsv(text: String): List<EnergySample> = text.lineSequence()
             .filter { it.isNotBlank() && !it.startsWith("time_ms") }
             .mapNotNull { line ->
                 val p = line.split(',')
-                if (p.size != 14) return@mapNotNull null
+                if (p.size != 14 && p.size != 18) return@mapNotNull null
+                val extended = p.size == 18
                 try {
                     EnergySample(
                         timeMs = p[0].toLong(), session = p[1].toLong(), visible = p[2] == "1",
@@ -128,6 +155,10 @@ class EnergyLog(private val capacity: Int = 5000) {
                         bindingRuns = p[6].toLong(), redraws = p[7].toLong(), moves = p[8].toLong(),
                         wakeups = p[9].toLong(), batteryPercent = p[10].toInt(), charging = p[11] == "1",
                         currentMicroAmps = p[12].toLongOrNull(), chargeMicroAh = p[13].toLongOrNull(),
+                        uiCpuMs = if (extended) p[14].toLongOrNull() else null,
+                        renderCpuMs = if (extended) p[15].toLongOrNull() else null,
+                        gpuMs = if (extended) p[16].toLongOrNull() else null,
+                        lateFrames = if (extended) p[17].toLong() else 0L,
                     )
                 } catch (e: NumberFormatException) {
                     null
@@ -152,6 +183,10 @@ class EnergyLog(private val capacity: Int = 5000) {
             var chargeUsed = 0L
             var chargeKnown = false
             var pctDrop = 0
+            var late = 0L
+            val ui = Part()
+            val render = Part()
+            val gpu = Part()
             for (i in 1 until samples.size) {
                 val a = samples[i - 1]
                 val b = samples[i]
@@ -167,6 +202,10 @@ class EnergyLog(private val capacity: Int = 5000) {
                     redraws += b.redraws - a.redraws
                     moves += b.moves - a.moves
                     wakeups += b.wakeups - a.wakeups
+                    late += b.lateFrames - a.lateFrames
+                    ui.add(a.uiCpuMs, b.uiCpuMs, dt, b.frames - a.frames)
+                    render.add(a.renderCpuMs, b.renderCpuMs, dt, b.frames - a.frames)
+                    gpu.add(a.gpuMs, b.gpuMs, dt, b.frames - a.frames)
                 }
                 if (!a.charging && !b.charging) {
                     dischargeMs += dt
@@ -196,7 +235,29 @@ class EnergyLog(private val capacity: Int = 5000) {
                 milliAmpHoursUsed = if (chargeKnown) maxOf(0L, chargeUsed) / 1000.0 else null,
                 // Battery percent only moves in whole steps, so it needs a long window to mean anything.
                 batteryPercentPerHour = if (hours >= 0.5) pctDrop / hours else null,
+                uiCpuPercent = ui.percent(),
+                renderCpuPercent = render.percent(),
+                gpuMsPerFrame = gpu.perFrame(),
+                latePercent = if (frames > 0) late * 100.0 / frames else 0.0,
             )
+        }
+
+        /** Totals for a counter some samples may lack (older logs, unreadable /proc). */
+        private class Part {
+            var value = 0L
+            var ms = 0L
+            var frames = 0L
+
+            fun add(a: Long?, b: Long?, dt: Long, df: Long) {
+                if (a == null || b == null || b < a) return
+                value += b - a
+                ms += dt
+                frames += df
+            }
+
+            fun percent(): Double? = if (ms > 0) value * 100.0 / ms else null
+
+            fun perFrame(): Double? = if (frames > 0) value.toDouble() / frames else null
         }
 
         /** Totals for intervals that started while hidden, within one process session. */

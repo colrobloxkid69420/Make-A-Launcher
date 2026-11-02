@@ -101,4 +101,77 @@ class GraphTest {
         a.set(2)
         assertEquals(2, requests)
     }
+
+    @Test
+    fun stableDependenciesDontFlapActiveState() {
+        val g = Graph()
+        val a = g.source(0)
+        val changes = ArrayList<Boolean>()
+        a.onActiveChanged = { changes += it }
+        val e = g.effect { a.value }
+        repeat(5) {
+            a.set(it + 1)
+            g.flush()
+        }
+        assertEquals(listOf(true), changes)
+        e.dispose()
+        assertEquals(listOf(true, false), changes)
+    }
+
+    @Test
+    fun pausedEffectsSkipWorkAndCatchUpOnlyIfNeeded() {
+        val g = Graph()
+        val a = g.source(1)
+        val b = g.source(1)
+        var runs = 0
+        var seen = 0
+        val e = g.effect {
+            runs++
+            seen = a.value
+        }
+        e.pause()
+        assertEquals(0, a.observerCount)
+        a.set(2)
+        b.set(2)
+        assertEquals(0, g.flush())
+
+        e.resume()
+        assertEquals(1, g.flush(), "a changed while paused")
+        assertEquals(2, seen)
+
+        e.pause()
+        b.set(3) // not read by the effect
+        e.resume()
+        assertEquals(0, g.flush(), "nothing it reads changed")
+        assertEquals(2, runs)
+    }
+
+    @Test
+    fun pausingAQueuedEffectRunsItOnResume() {
+        val g = Graph()
+        val a = g.source(1)
+        var seen = 0
+        val e = g.effect { seen = a.value }
+        a.set(2) // queued
+        e.pause()
+        assertEquals(0, g.flush())
+        e.resume()
+        g.flush()
+        assertEquals(2, seen)
+    }
+
+    @Test
+    fun aSourceRefreshedOnActivationIsSeenByTheResumingEffect() {
+        val g = Graph()
+        val tick = g.source(0L)
+        tick.onActiveChanged = { active -> if (active) tick.set(tick.peek() + 1) }
+        var seen = -1L
+        val e = g.effect { seen = tick.value } // first subscription refreshes it
+        g.flush()
+        assertEquals(1L, seen)
+        e.pause()
+        e.resume()
+        g.flush()
+        assertEquals(2L, seen)
+    }
 }

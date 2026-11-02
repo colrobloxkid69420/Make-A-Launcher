@@ -10,6 +10,8 @@ import java.io.File
 import java.time.ZoneOffset
 import java.time.ZonedDateTime
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /** The demo preset ships in the APK, so it must always load cleanly. */
@@ -32,8 +34,10 @@ class DemoPresetTest {
         val rt = SceneRuntime(result.preset!!, graph, data, FakeMeasurer(), density = 2f)
         rt.setViewport(1080f, 2400f)
         rt.update()
-        assertTrue(data.time.secondsNeeded, "page 2 shows seconds")
+        assertFalse(data.time.secondsNeeded, "the seconds display is on page 2, which is off screen")
         assertEquals(200f, rt.node("battery-bar")!!.width)
+        assertNotNull(rt.node("battery-card")!!.layerBounds, "the paged battery card moves as one cached layer")
+        assertNotNull(rt.node("clock")!!.layerBounds, "the big clock fades and moves as one cached layer")
 
         data.battery.level.set(40)
         data.battery.charging.set(true)
@@ -41,5 +45,9 @@ class DemoPresetTest {
         assertEquals(80f, rt.node("battery-bar")!!.width)
         assertEquals(1f, rt.node("battery-charging")!!.drawAlpha)
         assertTrue(rt.runtimeErrors.isEmpty(), rt.runtimeErrors.toString())
+
+        rt.setScroll(1f)
+        rt.update()
+        assertTrue(data.time.secondsNeeded, "page 2 is on screen")
     }
 }

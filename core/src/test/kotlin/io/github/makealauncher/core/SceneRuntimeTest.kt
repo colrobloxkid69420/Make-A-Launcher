@@ -14,6 +14,8 @@ import java.time.ZoneOffset
 import java.time.ZonedDateTime
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /** Text is 0.5 × size per character wide and 1.2 × size tall. */
@@ -209,7 +211,174 @@ class SceneRuntimeTest {
         now = now.plusSeconds(1)
         data.time.onSecond()
         rt.update()
-        // header-clock plus the few items showing seconds; not the other ~290.
-        assertEquals(7, rt.contentChanged.size, "seconds tick re-recorded ${rt.contentChanged.map { it.id }}")
+        // Only things showing seconds that are on or near the screen (now page 3) redraw:
+        // the fixed header and page 3's seconds items, never the ~290 others or page 1's.
+        val redrawn = rt.contentChanged.map { it.id }.toSet()
+        assertTrue(redrawn.containsAll(setOf("header-clock", "item-201", "item-251")), redrawn.toString())
+        assertTrue(redrawn.none { it == "item-1" || it == "item-51" }, redrawn.toString())
+        assertTrue(redrawn.size <= 7, redrawn.toString())
+    }
+
+    private val pagedScene = """
+        pages: 3
+        layers:
+          - id: fixed
+            type: text
+            text: '{time.format("HH:mm")}'
+          - id: seconds
+            type: text
+            page: 1
+            text: '{time.format("ss")}'
+            anchor: center
+          - id: level
+            type: text
+            page: 2
+            text: '{battery.level}'
+            anchor: center
+    """.trimIndent()
+
+    @Test
+    fun offscreenPagesArePausedAndCatchUpWhenShown() {
+        val rig = Rig(pagedScene)
+        val rt = rig.runtime
+        rt.update()
+        assertTrue(rt.node("seconds")!!.paused)
+        assertTrue(rt.node("level")!!.paused)
+        assertFalse(rig.data.time.secondsNeeded, "no seconds timer while the seconds page is off screen")
+
+        // Data changes while off screen: nothing runs.
+        val runs = rig.graph.effectRuns
+        rig.data.battery.level.set(33)
+        rig.now = rig.now.plusSeconds(5)
+        rig.data.time.onSecond()
+        rt.update()
+        assertEquals(runs, rig.graph.effectRuns)
+
+        // Scroll to the last page: the battery text catches up in the same frame it appears.
+        rt.setScroll(2f)
+        rt.update()
+        assertEquals("33", rt.node("level")!!.text)
+        assertTrue(rt.node("seconds")!!.paused)
+
+        // On page 2 the seconds display is shown with the current time.
+        rt.setScroll(1f)
+        rt.update()
+        assertFalse(rt.node("seconds")!!.paused)
+        assertEquals("12", rt.node("seconds")!!.text)
+        assertTrue(rig.data.time.secondsNeeded)
+    }
+
+    @Test
+    fun secondsTimerFollowsWhatIsOnScreen() {
+        val rig = Rig(pagedScene)
+        val rt = rig.runtime
+        val changes = ArrayList<Boolean>()
+        rig.data.time.onSecondsNeededChanged = { needed ->
+            changes += needed
+            if (needed) rig.data.time.onSecond()
+        }
+        rt.update()
+        assertEquals(listOf(false), changes)
+        rt.setScroll(0.5f)
+        rt.update()
+        assertEquals(listOf(false, true), changes)
+        // Ticking while visible keeps the subscription; it doesn't flap.
+        repeat(3) {
+            rig.data.time.onSecond()
+            rt.update()
+        }
+        assertEquals(listOf(false, true), changes)
+        rt.setScroll(0f)
+        rt.update()
+        assertEquals(listOf(false, true, false), changes)
+    }
+
+    @Test
+    fun pausingCanBeTurnedOff() {
+        val rig = Rig(pagedScene)
+        val rt = rig.runtime
+        rt.pauseOffscreen = false
+        rt.update()
+        assertFalse(rt.node("seconds")!!.paused)
+        assertTrue(rig.data.time.secondsNeeded)
+    }
+
+    private val layerScene = """
+        pages: 2
+        layers:
+          - id: card
+            type: group
+            page: 0
+            width: 200
+            height: 100
+            children:
+              - id: card-bg
+                type: shape
+                width: 200
+                height: 100
+              - id: card-text
+                type: text
+                text: Hello
+          - id: big
+            type: text
+            page: 1
+            text: '12:00'
+            size: 64
+          - id: small
+            type: text
+            page: 1
+            text: hi
+          - id: animated-group
+            type: group
+            page: 1
+            children:
+              - id: spinner
+                type: shape
+                animate:
+                  - on: scroll
+                    rotation: [0, 90]
+              - id: spinner-label
+                type: text
+                text: x
+          - id: fixed-big
+            type: text
+            text: Fixed
+            size: 64
+    """.trimIndent()
+
+    @Test
+    fun expensiveMovingLayersAreCachedOnTheGpu() {
+        val rig = Rig(layerScene)
+        val rt = rig.runtime
+        rt.update()
+        val card = rt.node("card")!!
+        val bounds = assertNotNull(card.layerBounds)
+        // The group's box (400 x 200 px) plus text overhang and padding.
+        assertTrue(bounds.left < 0f && bounds.top < 0f && bounds.right >= 400f && bounds.bottom >= 200f, bounds.toString())
+        assertNotNull(rt.node("big")!!.layerBounds)
+        assertNull(rt.node("small")!!.layerBounds, "small text is cheap to draw")
+        assertNull(rt.node("animated-group")!!.layerBounds, "a child moves on its own")
+        assertNull(rt.node("fixed-big")!!.layerBounds, "doesn't move")
+        assertNull(rt.node("card-bg")!!.layerBounds)
+
+        // Scrolling never re-plans or re-records.
+        rt.setScroll(0.5f)
+        rt.update()
+        assertTrue(rt.contentChanged.isEmpty())
+
+        rt.cacheLayers = false
+        rt.update()
+        assertNull(card.layerBounds)
+        assertTrue(rt.contentChanged.any { it.id == "card" }, "the renderer must re-record it without the layer")
+    }
+
+    @Test
+    fun singleDrawNodesAvoidOffscreenAlpha() {
+        val rig = Rig(layerScene)
+        val rt = rig.runtime
+        rt.update()
+        assertTrue(rt.node("small")!!.drawsOnce)
+        assertTrue(rt.node("card-bg")!!.drawsOnce) // no fill or stroke set: nothing overlaps
+        assertFalse(rt.node("card")!!.drawsOnce)
     }
 }

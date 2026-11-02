@@ -23,7 +23,11 @@ import java.io.IOException
  *
  * Samples are appended to a small CSV file so the log survives the app being closed.
  */
-class EnergyMonitor(private val context: Context, private val frames: FrameStats) {
+class EnergyMonitor(
+    private val context: Context,
+    private val frames: FrameStats,
+    val threads: ThreadCpu,
+) {
     val log = EnergyLog(capacity = MAX_SAMPLES)
     private val file = File(context.filesDir, "energy-log.csv")
     private val session = Process.getStartElapsedRealtime()
@@ -88,6 +92,10 @@ class EnergyMonitor(private val context: Context, private val frames: FrameStats
             currentMicroAmps = currentMicroAmps(charging),
             chargeMicroAh = battery?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
                 ?.takeIf { it != Int.MIN_VALUE && it > 0 }?.toLong(),
+            uiCpuMs = threads.uiMs(),
+            renderCpuMs = threads.renderMs(),
+            gpuMs = frames.gpuNanos / 1_000_000,
+            lateFrames = frames.lateFrames,
         )
         log.add(s)
         append(s)

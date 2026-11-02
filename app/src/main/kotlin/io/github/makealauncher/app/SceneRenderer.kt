@@ -14,6 +14,7 @@ import io.github.makealauncher.core.scene.ContentSpec
 import io.github.makealauncher.core.scene.Fit
 import io.github.makealauncher.core.scene.ShapeKind
 import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 
@@ -24,6 +25,13 @@ import kotlin.math.min
  * only references its children's RenderNodes, so re-recording a child never touches the
  * parent. Moving, fading, scaling or rotating a component is a property change on its
  * RenderNode: the render thread re-composites the cached drawing without re-recording it.
+ *
+ * Two things keep scrolling cheap for the render thread and GPU:
+ * - Layers the engine picked for caching ([RuntimeNode.layerBounds]) are drawn once into a GPU
+ *   texture (a compositing layer) and then just moved, faded and scaled as a texture. They're
+ *   re-rendered only when their content changes.
+ * - Fading a node normally means drawing it into an offscreen buffer first. Nodes that draw
+ *   with a single paint declare that they don't overlap, so alpha is applied directly.
  */
 class SceneRenderer(private val text: TextLayouts, private val images: Images) {
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
@@ -45,7 +53,9 @@ class SceneRenderer(private val text: TextLayouts, private val images: Images) {
     fun release(runtime: SceneRuntime) {
         for (n in runtime.nodes) {
             (n.platform as? RenderNode)?.discardDisplayList()
+            (n.platformLayer as? RenderNode)?.discardDisplayList()
             n.platform = null
+            n.platformLayer = null
         }
     }
 
@@ -75,21 +85,56 @@ class SceneRenderer(private val text: TextLayouts, private val images: Images) {
         val r = renderNode(n)
         val w = max(1, ceil(n.width).toInt())
         val h = max(1, ceil(n.height).toInt())
-        val canvas = r.beginRecording(w, h)
-        try {
-            when (val c = n.content) {
-                ContentSpec.Group -> {
-                    if (n === runtime.root) runtime.background?.let { canvas.drawColor(it) }
-                    for (child in n.children) canvas.drawRenderNode(renderNode(child))
-                }
-                is ContentSpec.Text -> drawText(canvas, n)
-                is ContentSpec.Shape -> drawShape(canvas, n, c)
-                is ContentSpec.Image -> drawImage(canvas, n, c)
+        val bounds = n.layerBounds
+        if (bounds == null) {
+            (n.platformLayer as? RenderNode)?.discardDisplayList()
+            n.platformLayer = null
+            r.setHasOverlappingRendering(!n.drawsOnce)
+            val canvas = r.beginRecording(w, h)
+            try {
+                drawContent(canvas, n, runtime)
+            } finally {
+                r.endRecording()
             }
-        } finally {
-            r.endRecording()
+        } else {
+            // The content goes into its own node, rendered once into a GPU texture. Its bounds are
+            // padded so glyphs and children that paint outside the box aren't clipped.
+            val layer = n.platformLayer as? RenderNode ?: RenderNode("${n.id}#layer").also { n.platformLayer = it }
+            val left = floor(bounds.left).toInt()
+            val top = floor(bounds.top).toInt()
+            val right = ceil(bounds.right).toInt()
+            val bottom = ceil(bounds.bottom).toInt()
+            layer.setPosition(left, top, right, bottom)
+            layer.setUseCompositingLayer(true, null)
+            val lc = layer.beginRecording(right - left, bottom - top)
+            try {
+                lc.translate(-left.toFloat(), -top.toFloat())
+                drawContent(lc, n, runtime)
+            } finally {
+                layer.endRecording()
+            }
+            // The outer node only places the texture, so alpha can go straight onto it.
+            r.setHasOverlappingRendering(false)
+            val canvas = r.beginRecording(w, h)
+            try {
+                canvas.drawRenderNode(layer)
+            } finally {
+                r.endRecording()
+            }
         }
         n.recordCount++
+    }
+
+    private fun drawContent(canvas: Canvas, n: RuntimeNode, runtime: SceneRuntime) {
+        when (val c = n.content) {
+            ContentSpec.Group -> {
+                if (n === runtime.root) runtime.background?.let { canvas.drawColor(it) }
+                for (child in n.children) canvas.drawRenderNode(renderNode(child))
+            }
+            is ContentSpec.Text -> drawText(canvas, n)
+            is ContentSpec.Shape -> drawShape(canvas, n, c)
+            is ContentSpec.Image -> drawImage(canvas, n, c)
+        }
     }
 
     private fun drawText(canvas: Canvas, n: RuntimeNode) {

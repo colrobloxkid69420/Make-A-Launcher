@@ -31,6 +31,10 @@ class MainActivity : Activity() {
     private lateinit var tests: PowerTests
     private val frameStats = FrameStats()
 
+    // Engine optimizations; switchable from the menu so their effect can be measured.
+    private var cacheLayers = true
+    private var pauseOffscreen = true
+
     private var runtime: SceneRuntime? = null
     private var sources: AndroidDataSources? = null
     private var started = false
@@ -39,7 +43,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        monitor = EnergyMonitor(this, frameStats)
+        monitor = EnergyMonitor(this, frameStats, ThreadCpu())
         sceneView = SceneView(this).apply { onLongPress = { showMenu() } }
         statsOverlay = StatsOverlay(this, frameStats, monitor).apply {
             setOnApplyWindowInsetsListener { v, insets ->
@@ -53,8 +57,8 @@ class MainActivity : Activity() {
             addView(statsOverlay, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         }
         setContentView(root)
-        frameStats.attach(window, Handler(Looper.getMainLooper()), display?.refreshRate ?: 60f)
-        tests = PowerTests(this, monitor, frameStats, sceneView, statsOverlay) { currentPresetName }
+        frameStats.attach(window, Handler(Looper.getMainLooper()))
+        tests = PowerTests(this, monitor, frameStats, sceneView, statsOverlay, { currentPresetName }, ::settingsSummary)
 
         currentPreset = savedInstanceState?.getString(KEY_PRESET) ?: intent.getStringExtra(KEY_PRESET) ?: PRESET_DEMO
         load(currentPreset)
@@ -114,6 +118,8 @@ class MainActivity : Activity() {
         val text = TextLayouts(assetsDir)
         val images = Images(assetsDir)
         val rt = SceneRuntime(preset, graph, data, AndroidMeasurer(text, images), resources.displayMetrics.density)
+        rt.cacheLayers = cacheLayers
+        rt.pauseOffscreen = pauseOffscreen
         graph.onSchedule = { sceneView.requestFrame() }
         runtime = rt
         currentPreset = which
@@ -142,6 +148,7 @@ class MainActivity : Activity() {
             "Battery test: idle, ${PowerTests.Kind.IDLE.minutes} min",
             "Battery test: scrolling, ${PowerTests.Kind.SCROLL.minutes} min",
             "Battery log",
+            "Engine settings…",
             statsLabel,
         )
         AlertDialog.Builder(this)
@@ -154,9 +161,35 @@ class MainActivity : Activity() {
                     3 -> tests.start(PowerTests.Kind.IDLE)
                     4 -> tests.start(PowerTests.Kind.SCROLL)
                     5 -> showBatteryLog()
-                    6 -> statsOverlay.visibility = if (statsOverlay.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+                    6 -> showSettings()
+                    7 -> statsOverlay.visibility = if (statsOverlay.visibility == View.VISIBLE) View.GONE else View.VISIBLE
                 }
             }
+            .show()
+    }
+
+    private fun settingsSummary(): String =
+        "layer caching ${if (cacheLayers) "on" else "off"}, off-screen pausing ${if (pauseOffscreen) "on" else "off"}"
+
+    /** Turns engine optimizations on or off, so a battery test can measure what each one saves. */
+    private fun showSettings() {
+        val checked = booleanArrayOf(cacheLayers, pauseOffscreen)
+        AlertDialog.Builder(this)
+            .setTitle("Engine settings")
+            .setMultiChoiceItems(
+                arrayOf("Cache moving layers on the GPU", "Pause pages that are off screen"),
+                checked,
+            ) { _, which, isChecked -> checked[which] = isChecked }
+            .setPositiveButton("Apply") { _, _ ->
+                cacheLayers = checked[0]
+                pauseOffscreen = checked[1]
+                runtime?.let {
+                    it.cacheLayers = cacheLayers
+                    it.pauseOffscreen = pauseOffscreen
+                    sceneView.requestFrame()
+                }
+            }
+            .setNegativeButton("Cancel", null)
             .show()
     }
 

@@ -12,6 +12,12 @@ import io.github.makealauncher.core.scene.GlobalType
 import io.github.makealauncher.core.scene.NodeSpec
 import io.github.makealauncher.core.scene.Preset
 import io.github.makealauncher.core.scene.Value
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.hypot
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.sin
 
 /**
  * Runs a loaded preset. Each frame the host calls [update], then applies [contentChanged]
@@ -21,7 +27,12 @@ import io.github.makealauncher.core.scene.Value
  * - a data change re-runs just the bindings that read it, and marks just their nodes;
  * - layout runs only when a size or offset changed;
  * - a scroll change touches only nodes that are paged or scroll-animated, and only their
- *   transforms. No binding runs during a scroll.
+ *   transforms. No binding runs during a scroll;
+ * - layers on pages that are off screen are paused: their bindings stop listening (so, for
+ *   example, a seconds display on another page doesn't keep a timer running) and catch up
+ *   in the frame they come back into view;
+ * - moving layers that are expensive to draw get a GPU layer ([RuntimeNode.layerBounds]), so
+ *   scrolling composites a cached texture instead of redrawing them.
  */
 class SceneRuntime(
     val preset: Preset,
@@ -43,6 +54,10 @@ class SceneRuntime(
     private val byId = HashMap<String, RuntimeNode>()
     private val scrollNodes: Array<RuntimeNode>
     private val scrollAnims: Array<Array<CompiledAnim>>
+    private val pagedRoots: Array<RuntimeNode>
+    /** Per paged root: the most it can move sideways (px) and grow (factor) from animations. */
+    private val pagedReachX: FloatArray
+    private val pagedMaxScale: FloatArray
 
     /** Background colour of the root, or null. */
     var background: Int? = null; private set
@@ -52,8 +67,26 @@ class SceneRuntime(
     private var scroll = 0f
     private var scrollDirty = true
     private var layoutDirty = true
+    private var pagingDirty = true
+    private var layerPlanDirty = true
     private val pendingContent = LinkedHashSet<RuntimeNode>()
     private val pendingTransform = LinkedHashSet<RuntimeNode>()
+
+    /** Pause bindings of paged layers while they're off screen. */
+    var pauseOffscreen = true
+        set(value) {
+            if (field == value) return
+            field = value
+            pagingDirty = true
+        }
+
+    /** Give expensive moving layers a GPU layer. */
+    var cacheLayers = true
+        set(value) {
+            if (field == value) return
+            field = value
+            layerPlanDirty = true
+        }
 
     /** Filled by [update]: nodes whose drawing must be re-recorded this frame. */
     val contentChanged = ArrayList<RuntimeNode>()
@@ -75,6 +108,7 @@ class SceneRuntime(
         for (layer in preset.scene.layers) build(layer, root, all)
         nodes = all
         scrollNodes = all.filter { n -> n.spec != null && (n.spec.page != null || n.spec.animations.isNotEmpty()) }.toTypedArray()
+        for (n in scrollNodes) n.scrollDriven = true
         scrollAnims = Array(scrollNodes.size) { i ->
             scrollNodes[i].spec!!.animations.map { a ->
                 val entries = a.tracks.entries.toList()
@@ -85,6 +119,17 @@ class SceneRuntime(
                     values = Array(entries.size) { entries[it].value },
                 )
             }.toTypedArray()
+        }
+        pagedRoots = root.children.filter { it.spec!!.page != null }.toTypedArray()
+        pagedReachX = FloatArray(pagedRoots.size) { i ->
+            pagedRoots[i].spec!!.animations.sumOf { a ->
+                (a.tracks[AnimProperty.TRANSLATE_X]?.maxOf { abs(it) } ?: 0f).toDouble()
+            }.toFloat() * density
+        }
+        pagedMaxScale = FloatArray(pagedRoots.size) { i ->
+            pagedRoots[i].spec!!.animations.fold(1f) { acc, a ->
+                acc * max(1f, a.tracks[AnimProperty.SCALE]?.maxOf { abs(it) } ?: 1f)
+            }
         }
         preset.scene.background?.let { v -> bind(root, v, "background") { c -> if (background != c) { background = c; markContent(root) } } }
         for (n in all) {
@@ -101,6 +146,8 @@ class SceneRuntime(
         viewportHeight = heightPx
         layoutDirty = true
         scrollDirty = true
+        pagingDirty = true
+        layerPlanDirty = true
     }
 
     /** Home-screen scroll position in pages: 0 = first page, 1.5 = halfway to the third. */
@@ -114,13 +161,14 @@ class SceneRuntime(
 
     /** True when [update] has work to do. */
     val needsUpdate: Boolean
-        get() = graph.hasPending || layoutDirty || scrollDirty || pendingContent.isNotEmpty() || pendingTransform.isNotEmpty()
+        get() = graph.hasPending || layoutDirty || scrollDirty || pagingDirty || layerPlanDirty ||
+            pendingContent.isNotEmpty() || pendingTransform.isNotEmpty()
 
     /** Runs pending bindings, layout and scroll animations. Returns true if anything changed. */
     fun update(): Boolean {
         contentChanged.clear()
         transformChanged.clear()
-        val ran = graph.flush()
+        var ran = graph.flush()
         if (layoutDirty) {
             layoutDirty = false
             layoutPass()
@@ -128,6 +176,23 @@ class SceneRuntime(
         if (scrollDirty) {
             scrollDirty = false
             applyScroll()
+            pagingDirty = true
+        }
+        // A page that just came into view catches up before this frame is drawn.
+        var passes = 0
+        while (pagingDirty && passes < MAX_PAGING_PASSES) {
+            pagingDirty = false
+            passes++
+            if (!updatePaging()) break
+            ran += graph.flush()
+            if (layoutDirty) {
+                layoutDirty = false
+                layoutPass()
+            }
+        }
+        if (layerPlanDirty) {
+            layerPlanDirty = false
+            planLayers()
         }
         for (n in pendingContent) {
             n.contentDirty = false
@@ -168,6 +233,7 @@ class SceneRuntime(
         var transformUpdates = 0L
         var layouts = 0L
         var measures = 0L
+        var layerPlans = 0L
     }
 
     // ---- building and binding ------------------------------------------------------------
@@ -221,15 +287,19 @@ class SceneRuntime(
     private fun <T> bind(n: RuntimeNode, value: Value<T>, property: String, apply: (T) -> Unit) {
         when (value) {
             is Value.Const -> apply(value.value)
-            is Value.Bound -> effects += graph.effect {
-                n.bindingRuns++
-                val raw = value.template.evaluate(scope)
-                val converted = value.convert(raw)
-                if (converted != null) {
-                    apply(converted)
-                } else {
-                    reportError("line ${value.line}: '${n.id}' $property got '${raw}', which isn't a valid value")
+            is Value.Bound -> {
+                val e = graph.effect {
+                    n.bindingRuns++
+                    val raw = value.template.evaluate(scope)
+                    val converted = value.convert(raw)
+                    if (converted != null) {
+                        apply(converted)
+                    } else {
+                        reportError("line ${value.line}: '${n.id}' $property got '${raw}', which isn't a valid value")
+                    }
                 }
+                effects += e
+                n.effects += e
             }
         }
     }
@@ -252,6 +322,17 @@ class SceneRuntime(
             n.transformDirty = true
             pendingTransform += n
         }
+        // A layer's bounds include its children's rotation and scale, so re-plan if they change.
+        if (n.parent != null && n.parent !== root && hasLayeredAncestor(n)) layerPlanDirty = true
+    }
+
+    private fun hasLayeredAncestor(n: RuntimeNode): Boolean {
+        var p = n.parent
+        while (p != null) {
+            if (p.layerBounds != null) return true
+            p = p.parent
+        }
+        return false
     }
 
     // ---- layout --------------------------------------------------------------------------
@@ -265,6 +346,8 @@ class SceneRuntime(
             markTransform(root)
         }
         for (child in root.children) layout(child, root.width, root.height)
+        pagingDirty = true
+        layerPlanDirty = true
     }
 
     private fun layout(n: RuntimeNode, parentW: Float, parentH: Float) {
@@ -366,8 +449,132 @@ class SceneRuntime(
         val values: Array<FloatArray>,
     )
 
+    // ---- paging --------------------------------------------------------------------------
+
+    /**
+     * Pauses paged layers that are fully off screen and resumes those that came back.
+     * Visibility uses a circle around the layer that covers any rotation, scaling and sideways
+     * animation, so a layer is never paused while any part of it could be showing.
+     * Returns true if anything was resumed.
+     */
+    private fun updatePaging(): Boolean {
+        var resumed = false
+        for (i in pagedRoots.indices) {
+            val n = pagedRoots[i]
+            val off = pauseOffscreen && viewportWidth > 0f && isOffscreen(n, i)
+            if (off == n.paused) continue
+            n.paused = off
+            if (off) {
+                setPausedRecursive(n, true)
+            } else {
+                setPausedRecursive(n, false)
+                resumed = true
+            }
+        }
+        return resumed
+    }
+
+    private fun isOffscreen(n: RuntimeNode, i: Int): Boolean {
+        val scale = max(1f, abs(n.scale)) * pagedMaxScale[i]
+        val radius = hypot(n.width, n.height) / 2f * scale + pagedReachX[i]
+        val cx = n.left + n.pageShift + n.width / 2f
+        return cx + radius < 0f || cx - radius > viewportWidth
+    }
+
+    private fun setPausedRecursive(n: RuntimeNode, pause: Boolean) {
+        for (e in n.effects) if (pause) e.pause() else e.resume()
+        for (c in n.children) setPausedRecursive(c, pause)
+    }
+
+    // ---- GPU layers ----------------------------------------------------------------------
+
+    /**
+     * Picks the moving layers worth caching on the GPU: groups and large or long text that move
+     * as one piece. Shapes and images are single cheap draws, and a layer whose children move
+     * on their own would have to be re-rendered every frame, so neither gets one. Total layer
+     * memory is capped at [LAYER_BUDGET_SCREENS] screens.
+     */
+    private fun planLayers() {
+        stats.layerPlans++
+        val screen = viewportWidth * viewportHeight
+        var used = 0f
+        for (n in scrollNodes) {
+            val wanted = if (cacheLayers && screen > 0f && wantsLayer(n)) layerBoundsFor(n) else null
+            val chosen = if (wanted != null && wanted.area <= screen && used + wanted.area <= screen * LAYER_BUDGET_SCREENS) {
+                used += wanted.area
+                wanted
+            } else {
+                null
+            }
+            if (chosen != n.layerBounds) {
+                n.layerBounds = chosen
+                markContent(n)
+            }
+        }
+    }
+
+    private fun wantsLayer(n: RuntimeNode): Boolean {
+        if (n.width <= 0f || n.height <= 0f) return false
+        if (anyDescendant(n) { it.scrollDriven }) return false
+        return when (n.content) {
+            ContentSpec.Group -> countDescendants(n) >= 2
+            is ContentSpec.Text -> n.textSize >= LARGE_TEXT_DP * density || n.text.length > LONG_TEXT_CHARS
+            else -> false
+        }
+    }
+
+    /** The node's box plus everything its content can paint outside it, relative to its top-left. */
+    private fun layerBoundsFor(n: RuntimeNode): LayerBounds {
+        val b = floatArrayOf(0f, 0f, n.width, n.height)
+        expandForContent(n, 0f, 0f, b)
+        for (c in n.children) unionDescendant(c, 0f, 0f, b)
+        val pad = LAYER_PAD_DP * density
+        return LayerBounds(b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad)
+    }
+
+    private fun unionDescendant(n: RuntimeNode, ox: Float, oy: Float, b: FloatArray) {
+        val x = ox + n.left
+        val y = oy + n.top
+        val s = abs(n.scale)
+        val rad = Math.toRadians(n.rotation.toDouble())
+        // Bounding box of the node's rectangle after rotation and scale about its centre.
+        val w = ((abs(cos(rad)) * n.width + abs(sin(rad)) * n.height) * s).toFloat()
+        val h = ((abs(sin(rad)) * n.width + abs(cos(rad)) * n.height) * s).toFloat()
+        val cx = x + n.width / 2f
+        val cy = y + n.height / 2f
+        b[0] = min(b[0], cx - w / 2f)
+        b[1] = min(b[1], cy - h / 2f)
+        b[2] = max(b[2], cx + w / 2f)
+        b[3] = max(b[3], cy + h / 2f)
+        expandForContent(n, x, y, b)
+        for (c in n.children) unionDescendant(c, x, y, b)
+    }
+
+    /** Text glyphs can paint a little outside their layout box. */
+    private fun expandForContent(n: RuntimeNode, x: Float, y: Float, b: FloatArray) {
+        if (n.content !is ContentSpec.Text) return
+        val pad = n.textSize * TEXT_OVERHANG
+        b[0] = min(b[0], x - pad)
+        b[1] = min(b[1], y - pad)
+        b[2] = max(b[2], x + n.width + pad)
+        b[3] = max(b[3], y + n.height + pad)
+    }
+
+    private fun anyDescendant(n: RuntimeNode, test: (RuntimeNode) -> Boolean): Boolean {
+        for (c in n.children) if (test(c) || anyDescendant(c, test)) return true
+        return false
+    }
+
+    private fun countDescendants(n: RuntimeNode): Int = n.children.sumOf { 1 + countDescendants(it) }
+
     private companion object {
         const val DEFAULT_SIZE_DP = 100f
         const val MAX_ERRORS = 50
+        const val LARGE_TEXT_DP = 48f
+        const val LONG_TEXT_CHARS = 40
+        const val LAYER_PAD_DP = 2f
+        const val TEXT_OVERHANG = 0.25f
+        const val LAYER_BUDGET_SCREENS = 2f
+        const val MAX_PAGING_PASSES = 3
     }
 }

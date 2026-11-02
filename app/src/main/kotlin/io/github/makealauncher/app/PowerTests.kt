@@ -29,6 +29,8 @@ class PowerTests(
     private val scene: SceneView,
     private val overlay: View,
     private val presetName: () -> String,
+    /** Which engine optimizations are on, for the record. */
+    private val settings: () -> String,
 ) {
     enum class Kind(val label: String, val minutes: Int) {
         IDLE("Idle test", 10),
@@ -40,8 +42,9 @@ class PowerTests(
         val startMs: Long,
         val preset: String,
         val overlayVisibility: Int,
-        val framesAtStart: Long,
-        val slowAtStart: Long,
+        val settings: String,
+        val workNanosAtStart: Long,
+        val workFramesAtStart: Long,
     )
 
     private val handler = Handler(Looper.getMainLooper())
@@ -54,7 +57,7 @@ class PowerTests(
     fun start(kind: Kind) {
         if (running != null) return
         val first = monitor.sample()
-        running = Running(kind, first.timeMs, presetName(), overlay.visibility, frames.totalFrames, frames.slowFrames)
+        running = Running(kind, first.timeMs, presetName(), overlay.visibility, settings(), scene.totalWorkNanos, scene.workFrames)
         activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         overlay.visibility = View.GONE
         monitor.intervalMs = TEST_INTERVAL_MS
@@ -81,22 +84,24 @@ class PowerTests(
     private fun finish() {
         val r = running ?: return
         monitor.sample()
-        val testFrames = frames.totalFrames - r.framesAtStart
-        val slow = frames.slowFrames - r.slowAtStart
         val p95 = frames.recentPercentileMs(95)
+        val workFrames = scene.workFrames - r.workFramesAtStart
+        val engineMs = if (workFrames > 0) (scene.totalWorkNanos - r.workNanosAtStart) / 1e6 / workFrames else 0.0
         cleanUp(r)
 
         val window = monitor.log.since(r.startMs)
         val summary = EnergyLog.summarize(window, visible = true)
         val lines = buildList {
             add("${r.kind.label} · ${r.preset}")
+            add("Settings: ${r.settings}")
             if (summary == null) {
                 add("Not enough samples to summarise.")
             } else {
                 addAll(summary.describe())
-                if (testFrames > 0) {
-                    add("Slow frames: ${slow * 100 / testFrames}% · recent p95 ${String.format(Locale.US, "%.1f", p95)} ms")
-                }
+                add(
+                    "Engine: ${String.format(Locale.US, "%.2f", engineMs)} ms per updated frame · " +
+                        "recent frame p95 ${String.format(Locale.US, "%.1f", p95)} ms",
+                )
             }
             if (window.any { it.charging }) add("Note: the phone was charging, so drain figures are incomplete.")
         }

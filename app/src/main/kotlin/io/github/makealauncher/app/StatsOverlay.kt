@@ -26,6 +26,7 @@ class StatsOverlay(
     private val frames: FrameStats,
     private val monitor: EnergyMonitor,
 ) : View(context) {
+    private val threads = monitor.threads
     private val density = resources.displayMetrics.density
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
@@ -50,6 +51,9 @@ class StatsOverlay(
     private var lastWorkNanos = 0L
     private var lastWorkFrames = 0L
     private var lastCpuMs = 0L
+    private var lastUiMs: Long? = null
+    private var lastRenderMs: Long? = null
+    private var lastGpuNanos = 0L
 
     private val tick = object : Runnable {
         override fun run() {
@@ -99,8 +103,10 @@ class StatsOverlay(
         val now = System.nanoTime()
         val stats = rt.stats
         val cpuMs = Process.getElapsedCpuTime()
+        val uiMs = threads.uiMs()
+        val renderMs = threads.renderMs()
         if (lastSampleTime == 0L) {
-            remember(now, rt, sv, cpuMs)
+            remember(now, rt, sv, cpuMs, uiMs, renderMs)
             return
         }
         val seconds = (now - lastSampleTime) / 1e9
@@ -110,21 +116,26 @@ class StatsOverlay(
         val workFrames = sv.workFrames - lastWorkFrames
         val workMs = if (workFrames > 0) (sv.totalWorkNanos - lastWorkNanos) / 1e6 / workFrames else 0.0
         val cpuPercent = (cpuMs - lastCpuMs) / 10.0 / seconds
+        val uiPercent = percent(uiMs, lastUiMs, seconds)
+        val renderPercent = percent(renderMs, lastRenderMs, seconds)
+        val frameCount = frames.totalFrames - lastFrames
+        val gpuMs = if (frameCount > 0) (frames.gpuNanos - lastGpuNanos) / 1e6 / frameCount else 0.0
         val current = monitor.currentMicroAmps()
 
         lines = buildList {
             add("$presetName · ${rt.nodes.size - 1} components · page ${fmt(rt.scrollPosition + 1, 1)}/${rt.pages}")
             add(
                 "frames/s ${fmt(fps, 0)}   p50 ${fmt(frames.recentPercentileMs(50), 1)} ms   " +
-                    "p95 ${fmt(frames.recentPercentileMs(95), 1)} ms   slow ${frames.recentSlowPercent()}%",
+                    "p95 ${fmt(frames.recentPercentileMs(95), 1)} ms   late ${frames.recentLatePercent()}%",
             )
-            add("engine ${fmt(workMs, 2)} ms/frame")
+            add("engine ${fmt(workMs, 2)} ms/frame · GPU ${fmt(gpuMs, 1)} ms/frame")
             add(
                 "per s: ${rate(stats.bindingRuns, lastBindingRuns, seconds)} bindings · " +
                     "${rate(stats.contentUpdates, lastContent, seconds)} redraws · " +
                     "${rate(stats.transformUpdates, lastTransforms, seconds)} moves",
             )
-            add("power: app CPU ${fmt(cpuPercent, 1)}% · phone ${current?.let { "${it / 1000} mA" } ?: "n/a"}")
+            val split = if (uiPercent != null && renderPercent != null) " (UI ${fmt(uiPercent, 0)} · render ${fmt(renderPercent, 0)})" else ""
+            add("power: app CPU ${fmt(cpuPercent, 1)}%$split · phone ${current?.let { "${it / 1000} mA" } ?: "n/a"}")
             monitor.lastBackground()?.let { bg ->
                 add("last hidden: " + if (bg.clean) "no background work" else "${bg.engineUpdates} updates, ${bg.wakeups} wakeups")
             }
@@ -132,10 +143,13 @@ class StatsOverlay(
             if (errors > 0) add("$errors warning(s); see logcat")
             add("long-press: presets, battery tests")
         }
-        remember(now, rt, sv, cpuMs)
+        remember(now, rt, sv, cpuMs, uiMs, renderMs)
     }
 
-    private fun remember(now: Long, rt: SceneRuntime, sv: SceneView, cpuMs: Long) {
+    private fun percent(now: Long?, before: Long?, seconds: Double): Double? =
+        if (now != null && before != null) (now - before) / 10.0 / seconds else null
+
+    private fun remember(now: Long, rt: SceneRuntime, sv: SceneView, cpuMs: Long, uiMs: Long?, renderMs: Long?) {
         lastSampleTime = now
         lastFrames = frames.totalFrames
         lastBindingRuns = rt.stats.bindingRuns
@@ -144,6 +158,9 @@ class StatsOverlay(
         lastWorkNanos = sv.totalWorkNanos
         lastWorkFrames = sv.workFrames
         lastCpuMs = cpuMs
+        lastUiMs = uiMs
+        lastRenderMs = renderMs
+        lastGpuNanos = frames.gpuNanos
     }
 
     private fun rate(now: Long, before: Long, seconds: Double) = fmt((now - before) / seconds, 0)

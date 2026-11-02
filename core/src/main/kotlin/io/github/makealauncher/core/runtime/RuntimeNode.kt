@@ -74,8 +74,37 @@ class RuntimeNode internal constructor(
     internal var contentDirty = false
     internal var transformDirty = false
 
+    /** Bindings of this node; paused together when its page is off screen. */
+    internal val effects = ArrayList<io.github.makealauncher.core.reactive.Effect>()
+
+    /** True for a paged layer that's off screen: its bindings are paused. */
+    var paused = false; internal set
+
+    /** Moves on every scroll frame (paged or scroll-animated). */
+    var scrollDriven = false; internal set
+
+    /**
+     * When set, the renderer caches this node's drawing in a GPU layer covering these bounds
+     * (relative to the node's top-left, in px), so moving it is just compositing a texture.
+     */
+    var layerBounds: LayerBounds? = null; internal set
+
+    /**
+     * True when the node draws with a single paint, so alpha can be applied directly instead
+     * of through an offscreen buffer.
+     */
+    val drawsOnce: Boolean
+        get() = when (content) {
+            is ContentSpec.Text, is ContentSpec.Image -> true
+            is ContentSpec.Shape -> fill == null || stroke == null || strokeWidth <= 0f
+            ContentSpec.Group -> false
+        }
+
     /** Platform render object (a RenderNode on Android). */
     var platform: Any? = null
+
+    /** Platform object for the cached layer, when [layerBounds] is set. */
+    var platformLayer: Any? = null
 
     /** Platform cache filled while measuring and reused for drawing (e.g. a StaticLayout). */
     var measureCache: Any? = null
@@ -89,6 +118,10 @@ class RuntimeNode internal constructor(
 }
 
 class Size(val width: Float, val height: Float)
+
+data class LayerBounds(val left: Float, val top: Float, val right: Float, val bottom: Float) {
+    val area: Float get() = (right - left) * (bottom - top)
+}
 
 /** Platform measurements the layout pass needs. Results are in pixels. */
 interface Measurer {

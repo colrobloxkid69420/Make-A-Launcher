@@ -29,6 +29,18 @@ class TimeData(graph: Graph, val clock: () -> ZonedDateTime) {
     fun onSecond() = secondTick.set(secondTick.peek() + 1)
 
     val secondsNeeded: Boolean get() = secondTick.observerCount > 0
+
+    /**
+     * Called when something on screen starts (true) or stops (false) showing seconds, for
+     * example when a page with a seconds display scrolls into view. The platform starts or
+     * stops its seconds timer here. When it starts it should call [onSecond] right away, so
+     * the display is up to date in the frame it appears.
+     */
+    var onSecondsNeededChanged: ((Boolean) -> Unit)? = null
+
+    init {
+        secondTick.onActiveChanged = { active -> onSecondsNeededChanged?.invoke(active) }
+    }
 }
 
 class BatteryData(graph: Graph) {

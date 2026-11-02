@@ -118,4 +118,36 @@ class EnergyLogTest {
         assertNull(EnergyLog.normalizeCurrent(Int.MIN_VALUE.toLong(), charging = false))
         assertNull(EnergyLog.normalizeCurrent(0, charging = false))
     }
+
+    @Test
+    fun threadSplitGpuAndLateFrames() {
+        val a = s(0, cpu = 0, frames = 0).copy(uiCpuMs = 0, renderCpuMs = 0, gpuMs = 0, lateFrames = 0)
+        val b = s(10_000, cpu = 6000, frames = 600).copy(uiCpuMs = 1500, renderCpuMs = 4000, gpuMs = 2400, lateFrames = 6)
+        val sum = assertNotNull(EnergyLog.summarize(listOf(a, b)))
+        assertEquals(60.0, sum.cpuPercent, 1e-9)
+        assertEquals(15.0, sum.uiCpuPercent!!, 1e-9)
+        assertEquals(40.0, sum.renderCpuPercent!!, 1e-9)
+        assertEquals(4.0, sum.gpuMsPerFrame!!, 1e-9)
+        assertEquals(1.0, sum.latePercent, 1e-9)
+        assertTrue(sum.describe().any { "render thread 40.0%" in it })
+    }
+
+    @Test
+    fun olderLogLinesStillParse() {
+        val old = "1000,1,1,10,20,3,4,5,6,7,80,0,300000,3000000"
+        val parsed = EnergyLog.fromCsv(EnergyLog.CSV_HEADER + "\n" + old + "\n")
+        assertEquals(1, parsed.size)
+        assertNull(parsed[0].uiCpuMs)
+        assertEquals(0L, parsed[0].lateFrames)
+        // A mix of old and new samples summarises without the split rather than failing.
+        val sum = assertNotNull(EnergyLog.summarize(listOf(parsed[0], s(11_000, cpu = 110).copy(uiCpuMs = 5))))
+        assertNull(sum.uiCpuPercent)
+    }
+
+    @Test
+    fun procStatParsing() {
+        val line = "12345 (Render Thread) S 1 2 3 4 5 6 7 8 9 10 250 75 0 0 20 0 1 0 100 0 0"
+        assertEquals(325L, io.github.makealauncher.core.energy.ProcStat.cpuTicks(line))
+        assertNull(io.github.makealauncher.core.energy.ProcStat.cpuTicks("garbage"))
+    }
 }
