@@ -34,6 +34,8 @@ class MainActivity : Activity() {
     // Engine optimizations; switchable from the menu so their effect can be measured.
     private var cacheLayers = true
     private var pauseOffscreen = true
+    /** Off by default: Android picks the refresh rate, usually saving battery. */
+    private var highestRefreshRate = false
 
     private var runtime: SceneRuntime? = null
     private var sources: AndroidDataSources? = null
@@ -172,20 +174,27 @@ class MainActivity : Activity() {
     }
 
     private fun settingsSummary(): String =
-        "layer caching ${if (cacheLayers) "on" else "off"}, off-screen pausing ${if (pauseOffscreen) "on" else "off"}"
+        "layer caching ${if (cacheLayers) "on" else "off"}, off-screen sleeping ${if (pauseOffscreen) "on" else "off"}, " +
+            "refresh rate ${if (highestRefreshRate) "highest" else "chosen by Android"}"
 
     /** Turns engine optimizations on or off, so a battery test can measure what each one saves. */
     private fun showSettings() {
-        val checked = booleanArrayOf(cacheLayers, pauseOffscreen)
+        val checked = booleanArrayOf(cacheLayers, pauseOffscreen, highestRefreshRate)
         AlertDialog.Builder(this)
             .setTitle("Engine settings")
             .setMultiChoiceItems(
-                arrayOf("Cache moving layers on the GPU", "Pause pages that are off screen"),
+                arrayOf(
+                    "Cache page content and moving layers on the GPU",
+                    "Sleep pages that are off screen",
+                    "Use the screen's highest refresh rate (smoother, more battery)",
+                ),
                 checked,
             ) { _, which, isChecked -> checked[which] = isChecked }
             .setPositiveButton("Apply") { _, _ ->
                 cacheLayers = checked[0]
                 pauseOffscreen = checked[1]
+                highestRefreshRate = checked[2]
+                applyRefreshRate()
                 runtime?.let {
                     it.cacheLayers = cacheLayers
                     it.pauseOffscreen = pauseOffscreen
@@ -194,6 +203,27 @@ class MainActivity : Activity() {
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    /**
+     * Asks for the display mode with the highest refresh rate at the current resolution, or lets
+     * Android choose again. Android may still lower it (battery saver, heat, app policy).
+     */
+    private fun applyRefreshRate() {
+        val d = display ?: return
+        val current = d.mode
+        val modeId = if (highestRefreshRate) {
+            d.supportedModes
+                .filter { it.physicalWidth == current.physicalWidth && it.physicalHeight == current.physicalHeight }
+                .maxByOrNull { it.refreshRate }?.modeId ?: 0
+        } else {
+            0
+        }
+        val attrs = window.attributes
+        if (attrs.preferredDisplayModeId != modeId) {
+            attrs.preferredDisplayModeId = modeId
+            window.attributes = attrs
+        }
     }
 
     /** Totals from the whole log: time on screen, time hidden, and whether anything ran hidden. */

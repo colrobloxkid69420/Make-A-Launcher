@@ -60,10 +60,13 @@ class RuntimeNode internal constructor(
     var animScale = 1f; internal set
     var animRotation = 0f; internal set
 
-    /** Final values the renderer applies as RenderNode properties. */
-    val drawX: Float get() = left + pageShift + animTx
+    /**
+     * Final values the renderer applies as RenderNode properties. The page shift isn't part of
+     * [drawX]: top-level paged layers move with their [run].
+     */
+    val drawX: Float get() = left + animTx
     val drawY: Float get() = top + animTy
-    val drawAlpha: Float get() = if (visible && !paused) (alpha * animAlpha).coerceIn(0f, 1f) else 0f
+    val drawAlpha: Float get() = if (visible) (alpha * animAlpha).coerceIn(0f, 1f) else 0f
     val drawScale: Float get() = scale * animScale
     val drawRotation: Float get() = rotation + animRotation
 
@@ -78,13 +81,28 @@ class RuntimeNode internal constructor(
     internal val effects = ArrayList<io.github.makealauncher.core.reactive.Effect>()
 
     /**
-     * True for a paged layer that's off screen and asleep: its bindings are paused and it isn't
-     * moved or drawn (its alpha is 0, so Android skips it and everything inside it).
+     * True for a paged layer that's off screen: its bindings are paused. Whether it's drawn is
+     * decided for its whole [run], which sleeps once none of its layers can be on screen.
      */
     var paused = false; internal set
 
-    /** Moves on every scroll frame (paged or scroll-animated). */
+    /** Has its own scroll animation, so its transform changes on every scroll frame. */
     var scrollDriven = false; internal set
+
+    /** For a top-level paged layer: the run it moves and sleeps with. */
+    var run: PageRun? = null; internal set
+
+    /** For a top-level paged layer that doesn't animate: the cached stretch it's drawn in. */
+    var subRun: SubRun? = null; internal set
+
+    /** The top-level layer this node belongs to (itself if top-level; the root for the root). */
+    internal var topLevel: RuntimeNode? = null
+
+    /** Index into the runtime's paged-root arrays, or -1. */
+    internal var pagedIndex = -1
+
+    /** Waiting in the incremental layout queue. */
+    internal var layoutQueued = false
 
     /**
      * When set, the renderer caches this node's drawing in a GPU layer covering these bounds

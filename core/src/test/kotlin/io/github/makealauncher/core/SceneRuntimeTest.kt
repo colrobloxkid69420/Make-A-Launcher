@@ -3,6 +3,8 @@ package io.github.makealauncher.core
 import io.github.makealauncher.core.data.DataSources
 import io.github.makealauncher.core.reactive.Graph
 import io.github.makealauncher.core.runtime.Measurer
+import io.github.makealauncher.core.runtime.PageRun
+import io.github.makealauncher.core.runtime.SubRun
 import io.github.makealauncher.core.runtime.RuntimeNode
 import io.github.makealauncher.core.runtime.SceneRuntime
 import io.github.makealauncher.core.runtime.Size
@@ -16,6 +18,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /** Text is 0.5 × size per character wide and 1.2 × size tall. */
@@ -115,8 +118,10 @@ class SceneRuntimeTest {
         assertEquals(20f, clock.top)
         val card = rt.node("page1-card")!!
         assertEquals(200f, card.width)
-        assertEquals(1000f, card.drawX, "page 1 starts one screen to the right")
-        assertEquals(0f, card.drawAlpha, "asleep while off screen, so it isn't drawn")
+        val run = card.run!!
+        assertEquals(1000f, run.shift, "page 1 starts one screen to the right")
+        assertFalse(run.awake, "asleep while off screen, so it isn't drawn")
+        assertEquals(0f, card.drawX, "the page shift is applied by its run, not the layer")
     }
 
     @Test
@@ -130,12 +135,15 @@ class SceneRuntimeTest {
         rt.setScroll(1f)
         assertTrue(rt.update())
         assertEquals(emptyList(), rt.contentChanged.map { it.id }, "scrolling must never re-record drawings")
-        assertEquals(setOf("page1-card", "parallax"), rig.ids(rt.transformChanged))
+        // The paged card doesn't move itself; its page run does. Only the animated layer moves.
+        assertEquals(setOf("parallax"), rig.ids(rt.transformChanged))
+        val run = rt.node("page1-card")!!.run!!
+        assertTrue(run in rt.runsMoved)
+        assertEquals(0f, run.shift)
+        assertTrue(run.awake)
         assertEquals(bindingRunsBefore, rig.graph.effectRuns, "scrolling must never run bindings")
         assertEquals(measuresBefore, rig.measurer.calls)
 
-        val card = rt.node("page1-card")!!
-        assertEquals(0f, card.drawX)
         val parallax = rt.node("parallax")!!
         assertEquals(-100f, parallax.animTx) // halfway through [0, -100] dp at density 2
         assertEquals(0.5f, parallax.drawAlpha)
@@ -230,18 +238,24 @@ class SceneRuntimeTest {
         val page3 = (200 until 300).map { "item-$it" }.toSet()
         assertTrue(page3.all { rt.node(it)!!.paused })
 
+        val page3Run = rt.node("item-250")!!.run!!
+        assertFalse(page3Run.awake)
+
         rt.setScroll(0.2f)
         rt.update()
         val moved = rt.transformChanged.map { it.id }.toSet()
         assertTrue(moved.none { it in page3 }, "page 3 is asleep and mustn't be moved")
-        assertTrue(moved.size < 210, "only pages 1 and 2 move, got ${moved.size}")
+        assertTrue(page3Run !in rt.runsMoved)
+        assertTrue(moved.size <= 200, "only pages 1 and 2 animate, got ${moved.size}")
 
         rt.setScroll(1.5f)
         rt.update()
         val item = rt.node("item-250")!!
         assertFalse(item.paused)
-        assertTrue(item in rt.transformChanged)
-        assertEquals((2 - 1.5f) * 1080f, item.pageShift)
+        assertTrue(page3Run.awake)
+        assertTrue(page3Run in rt.runsMoved)
+        assertEquals((2 - 1.5f) * 1080f, page3Run.shift)
+        assertTrue(item in rt.transformChanged, "its animation transform, skipped while asleep, is pushed")
         assertTrue(item.drawAlpha > 0f)
     }
 
@@ -401,10 +415,12 @@ class SceneRuntimeTest {
             page: 1
             text: '12:00'
             size: 64
+            offset: [24, 24]
           - id: small
             type: text
             page: 1
             text: hi
+            offset: [24, 120]
           - id: animated-group
             type: group
             page: 1
@@ -417,6 +433,7 @@ class SceneRuntimeTest {
               - id: spinner-label
                 type: text
                 text: x
+                offset: [24, 0]
           - id: fixed-big
             type: text
             text: Fixed
@@ -424,29 +441,150 @@ class SceneRuntimeTest {
     """.trimIndent()
 
     @Test
-    fun expensiveMovingLayersAreCachedOnTheGpu() {
+    fun staticPageContentIsCachedPerRunWhileAwake() {
         val rig = Rig(layerScene)
         val rt = rig.runtime
         rt.update()
-        val card = rt.node("card")!!
-        val bounds = assertNotNull(card.layerBounds)
-        // The group's box (400 x 200 px) plus text overhang and padding.
-        assertTrue(bounds.left < 0f && bounds.top < 0f && bounds.right >= 400f && bounds.bottom >= 200f, bounds.toString())
-        assertNotNull(rt.node("big")!!.layerBounds)
-        assertNull(rt.node("small")!!.layerBounds, "small text is cheap to draw")
-        assertNull(rt.node("animated-group")!!.layerBounds, "a child moves on its own")
-        assertNull(rt.node("fixed-big")!!.layerBounds, "doesn't move")
-        assertNull(rt.node("card-bg")!!.layerBounds)
+        val cardSub = rt.node("card")!!.subRun!!
+        assertTrue(cardSub.layered, "page 1's static content is cached while it's on screen")
+        val b = cardSub.bounds!!
+        // The group's box (400 x 200 px) plus text overhang and padding, in page coordinates.
+        assertTrue(b.left < 0f && b.top < 0f && b.right >= 400f && b.bottom >= 200f, b.toString())
 
-        // Scrolling never re-plans or re-records.
-        rt.setScroll(0.5f)
+        val page2 = rt.node("big")!!.run!!
+        assertEquals(listOf("big", "small"), (page2.parts[0] as SubRun).nodes.map { it.id })
+        assertSame<Any?>(rt.node("animated-group"), page2.parts[1], "a layer with moving parts is drawn on its own")
+        assertFalse((page2.parts[0] as SubRun).layered, "asleep, so no layer memory is used")
+        assertNull(rt.node("fixed-big")!!.layerBounds, "doesn't move")
+
+        rt.setScroll(1f)
         rt.update()
-        assertTrue(rt.contentChanged.isEmpty())
+        assertTrue((page2.parts[0] as SubRun).layered)
+        assertTrue(page2 in rt.runsChanged)
+        assertTrue(rt.contentChanged.isEmpty(), "waking a page re-records nothing but its run")
 
         rt.cacheLayers = false
         rt.update()
-        assertNull(card.layerBounds)
-        assertTrue(rt.contentChanged.any { it.id == "card" }, "the renderer must re-record it without the layer")
+        assertFalse((page2.parts[0] as SubRun).layered)
+    }
+
+    @Test
+    fun expensiveAnimatedLayersGetTheirOwnLayer() {
+        val rig = Rig(
+            """
+            pages: 2
+            layers:
+              - id: fading-clock
+                type: text
+                text: '12:00'
+                size: 64
+                animate:
+                  - on: scroll
+                    alpha: [1, 0]
+              - id: fading-small
+                type: text
+                text: hi
+                animate:
+                  - on: scroll
+                    alpha: [1, 0]
+              - id: sliding-card
+                type: group
+                page: 1
+                width: 100
+                height: 100
+                animate:
+                  - on: scroll
+                    translate_x: [200, 0]
+                children:
+                  - id: card-bg
+                    type: shape
+                  - id: card-label
+                    type: text
+                    text: Card
+            """.trimIndent(),
+        )
+        val rt = rig.runtime
+        rt.update()
+        assertNotNull(rt.node("fading-clock")!!.layerBounds)
+        assertNull(rt.node("fading-small")!!.layerBounds, "small text is cheap to draw")
+        assertNotNull(rt.node("sliding-card")!!.layerBounds)
+        assertNull(rt.node("sliding-card")!!.subRun, "it animates, so it's drawn on its own")
+
+        rt.setScroll(0.5f)
+        rt.update()
+        assertTrue(rt.contentChanged.isEmpty(), "scrolling never re-records")
+    }
+
+    @Test
+    fun runsKeepTheSceneDrawingOrder() {
+        val rig = Rig(
+            """
+            pages: 2
+            layers:
+              - {id: bg, type: shape}
+              - {id: a, type: shape, page: 0}
+              - id: b
+                type: shape
+                page: 0
+                animate:
+                  - on: scroll
+                    alpha: [1, 0]
+              - {id: c, type: shape, page: 0}
+              - {id: overlay, type: shape}
+              - {id: d, type: shape, page: 0}
+              - {id: e, type: shape, page: 1}
+            """.trimIndent(),
+        )
+        val rt = rig.runtime
+        fun describe(x: Any): String = when (x) {
+            is RuntimeNode -> x.id
+            is SubRun -> x.nodes.joinToString(",", "[", "]") { it.id }
+            is PageRun -> "page${x.page}(" + x.parts.joinToString(" ") { describe(it) } + ")"
+            else -> "?"
+        }
+        assertEquals(
+            listOf("bg", "page0([a] b [c])", "overlay", "page0([d])", "page1([e])"),
+            rt.rootEntries.map { describe(it) },
+        )
+    }
+
+    @Test
+    fun scrollingATypicalPresetMovesPagesNotLayers() {
+        val result = PresetLoader.load(StressPreset.files(count = 300, pages = 3, animateEvery = 10))
+        val graph = Graph()
+        val rt = SceneRuntime(result.preset!!, graph, DataSources(graph), FakeMeasurer(), density = 3f)
+        rt.setViewport(1080f, 2400f)
+        rt.update()
+        assertEquals(3, rt.runs.size)
+        var maxMoves = 0
+        var p = 0f
+        while (p <= 2f) {
+            rt.setScroll(p)
+            rt.update()
+            maxMoves = maxOf(maxMoves, rt.transformChanged.size + rt.runsMoved.size)
+            assertTrue(rt.contentChanged.isEmpty())
+            p += 1f / 60f
+        }
+        // Up to 3 runs plus the 1 in 10 items that animate on the awake pages (at most 30).
+        assertTrue(maxMoves <= 33, "moves per frame: $maxMoves")
+    }
+
+    @Test
+    fun aTickRelaysOutOnlyWhatChanged() {
+        val result = PresetLoader.load(StressPreset.files(count = 300, pages = 3, animateEvery = 10))
+        val graph = Graph()
+        var now = ZonedDateTime.of(2026, 11, 2, 9, 5, 7, 0, ZoneOffset.UTC)
+        val data = DataSources(graph) { now }
+        val rt = SceneRuntime(result.preset!!, graph, data, FakeMeasurer(), density = 3f)
+        rt.setViewport(1080f, 2400f)
+        rt.update()
+        val before = rt.stats.nodesLaidOut
+        now = now.plusSeconds(1)
+        data.time.onSecond()
+        rt.update()
+        val laidOut = rt.stats.nodesLaidOut - before
+        // The header and the seconds items on page 1, not all 301 layers.
+        assertTrue(laidOut in 1..5, "laid out $laidOut nodes")
     }
 
     @Test

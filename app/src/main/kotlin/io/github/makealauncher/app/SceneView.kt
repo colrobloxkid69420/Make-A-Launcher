@@ -162,7 +162,7 @@ class SceneView(context: Context) : View(context), Choreographer.FrameCallback {
             EnergyCounters.engineUpdates++
             EnergyCounters.bindingRuns += rt.stats.bindingRuns - bindingsBefore
             EnergyCounters.redraws += rt.contentChanged.size
-            EnergyCounters.moves += rt.transformChanged.size
+            EnergyCounters.moves += rt.transformChanged.size + rt.runsMoved.size
         }
         if (autoScroll || flinging || !scroller.isFinished || rt.needsUpdate) requestFrame()
     }

@@ -47,7 +47,7 @@ and is built to keep them near zero.
 | Menu → **Battery test: idle** (10 min) | Screen kept on, untouched. Reports CPU % (with the thread split), frames/s, late frames, GPU time, wakeups/min, average phone current and mAh used. |
 | Menu → **Battery test: scrolling** (2 min) | Pages scroll by themselves the whole time: the worst case for animation work. |
 | Menu → **Battery log** | Totals for time on screen and time hidden, from a log kept across app restarts. **Share** sends it as text with the raw CSV. |
-| Menu → **Engine settings** | Turns each optimization below on or off, so a test can show what it saves. |
+| Menu → **Engine settings** | Turns each optimization below on or off, so a test can show what it saves, and can ask for the screen's highest refresh rate (Android chooses by default, which usually saves battery). |
 
 Phone current includes the screen, which usually dominates, so compare like with like:
 
@@ -81,12 +81,19 @@ Scroll / touch ──▶ Native animator ─────────────
   A changed text re-records only itself.
 - **Declarative animation.** Scroll animations are keyframes evaluated natively; scrolling never
   runs bindings or re-records drawings, it only moves cached layers.
-- **GPU layer caching.** Moving layers that are expensive to draw (groups, large or long text)
-  are rendered once into a GPU texture; scrolling then only moves, fades and scales that texture.
-  Single-paint layers fade without an offscreen buffer. Layer memory is capped at two screens.
-- **Off-screen pages sleep.** Layers on a page that's fully off screen stop listening for data,
-  aren't moved and aren't drawn; they catch up in the frame the page comes back into view. A
-  seconds display on another page doesn't keep a timer running.
+- **Pages move as one piece.** Consecutive layers on the same page form a *page run* that
+  carries the page's position, so scrolling updates one value per visible page plus the layers
+  that have their own scroll animation (the scene's drawing order is kept).
+- **GPU caching.** A page's layers that don't animate are drawn once into a GPU texture while the
+  page is on screen, so scrolling moves cached images instead of redrawing every layer; only the
+  part that changes (a clock, say) is re-rendered. Animated layers that are expensive to draw
+  (groups, large or long text) get their own texture. Single-paint layers fade without an
+  offscreen buffer. Cached textures are capped at about 3.5 screens of memory.
+- **Off-screen pages sleep.** Layers that are fully off screen stop listening for data, and a page
+  with nothing on screen isn't moved or drawn; everything catches up in the frame it comes back
+  into view. A seconds display on another page doesn't keep a timer running.
+- **Incremental layout.** When a value changes, only that layer is laid out again (and its children,
+  if its size changed), not the whole scene.
 - **Sleep hard.** When the app isn't visible, every timer and listener stops. A seconds timer
   runs only while something on screen shows seconds.
 

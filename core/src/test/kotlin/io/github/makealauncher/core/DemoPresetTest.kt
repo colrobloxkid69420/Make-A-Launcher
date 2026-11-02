@@ -36,7 +36,7 @@ class DemoPresetTest {
         rt.update()
         assertFalse(data.time.secondsNeeded, "the seconds display is on page 2, which is off screen")
         assertEquals(200f, rt.node("battery-bar")!!.width)
-        assertNotNull(rt.node("battery-card")!!.layerBounds, "the paged battery card moves as one cached layer")
+        assertTrue(rt.node("battery-card")!!.subRun!!.layered, "page 1's static content is one cached layer")
         assertNotNull(rt.node("clock")!!.layerBounds, "the big clock fades and moves as one cached layer")
 
         data.battery.level.set(40)

@@ -8,8 +8,10 @@ import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.RenderNode
 import android.text.StaticLayout
+import io.github.makealauncher.core.runtime.PageRun
 import io.github.makealauncher.core.runtime.RuntimeNode
 import io.github.makealauncher.core.runtime.SceneRuntime
+import io.github.makealauncher.core.runtime.SubRun
 import io.github.makealauncher.core.scene.ContentSpec
 import io.github.makealauncher.core.scene.Fit
 import io.github.makealauncher.core.scene.ShapeKind
@@ -26,10 +28,14 @@ import kotlin.math.min
  * parent. Moving, fading, scaling or rotating a component is a property change on its
  * RenderNode: the render thread re-composites the cached drawing without re-recording it.
  *
- * Two things keep scrolling cheap for the render thread and GPU:
- * - Layers the engine picked for caching ([RuntimeNode.layerBounds]) are drawn once into a GPU
- *   texture (a compositing layer) and then just moved, faded and scaled as a texture. They're
- *   re-rendered only when their content changes.
+ * What keeps scrolling cheap for the render thread and GPU:
+ * - Each [PageRun] (consecutive layers on one page) is a container RenderNode that carries the
+ *   page's position, so scrolling moves one node per page. A run with nothing on screen gets
+ *   alpha 0, and Android skips drawing it and everything inside it.
+ * - Each [SubRun] (a run's layers that don't animate) is drawn once into a GPU texture (a
+ *   compositing layer) while its page is awake; scrolling just moves that texture.
+ * - Other expensive animated layers the engine picked ([RuntimeNode.layerBounds]) get their
+ *   own texture, re-rendered only when their content changes.
  * - Fading a node normally means drawing it into an offscreen buffer first. Nodes that draw
  *   with a single paint declare that they don't overlap, so alpha is applied directly.
  */
@@ -42,15 +48,28 @@ class SceneRenderer(private val text: TextLayouts, private val images: Images) {
 
     /** Re-records changed drawings and pushes changed transforms. */
     fun apply(runtime: SceneRuntime) {
+        val changedRuns = runtime.runsChanged
+        for (i in changedRuns.indices) recordRun(changedRuns[i])
         val transforms = runtime.transformChanged
         for (i in transforms.indices) applyTransform(transforms[i])
         val contents = runtime.contentChanged
         for (i in contents.indices) record(contents[i], runtime)
+        val movedRuns = runtime.runsMoved
+        for (i in movedRuns.indices) moveRun(movedRuns[i], runtime)
     }
 
     fun rootNode(runtime: SceneRuntime): RenderNode? = runtime.root.platform as? RenderNode
 
     fun release(runtime: SceneRuntime) {
+        for (r in runtime.runs) {
+            (r.platform as? RenderNode)?.discardDisplayList()
+            r.platform = null
+            for (part in r.parts) {
+                val sub = part as? SubRun ?: continue
+                (sub.platform as? RenderNode)?.discardDisplayList()
+                sub.platform = null
+            }
+        }
         for (n in runtime.nodes) {
             (n.platform as? RenderNode)?.discardDisplayList()
             (n.platformLayer as? RenderNode)?.discardDisplayList()
@@ -65,6 +84,59 @@ class SceneRenderer(private val text: TextLayouts, private val images: Images) {
             it.setClipToBounds(false)
             n.platform = it
         }
+
+    private fun runNode(r: PageRun): RenderNode =
+        r.platform as? RenderNode ?: RenderNode("page-${r.page}").also {
+            it.setClipToBounds(false)
+            // Its only job is to place the page, so alpha needs no offscreen pass.
+            it.setHasOverlappingRendering(false)
+            r.platform = it
+        }
+
+    private fun subRunNode(s: SubRun): RenderNode =
+        s.platform as? RenderNode ?: RenderNode("page-${s.run.page}-static").also { s.platform = it }
+
+    private fun moveRun(r: PageRun, runtime: SceneRuntime) {
+        val node = runNode(r)
+        node.setPosition(0, 0, max(1, ceil(runtime.root.width).toInt()), max(1, ceil(runtime.root.height).toInt()))
+        node.setTranslationX(r.shift)
+        node.setAlpha(if (r.awake) 1f else 0f)
+    }
+
+    /** Records a run: its cached static stretches and, between them, its animated layers. */
+    private fun recordRun(r: PageRun) {
+        for (part in r.parts) {
+            val sub = part as? SubRun ?: continue
+            val node = subRunNode(sub)
+            val b = sub.bounds
+            val left = if (b != null) floor(b.left).toInt() else 0
+            val top = if (b != null) floor(b.top).toInt() else 0
+            val right = if (b != null) ceil(b.right).toInt() else 1
+            val bottom = if (b != null) ceil(b.bottom).toInt() else 1
+            node.setPosition(left, top, max(left + 1, right), max(top + 1, bottom))
+            node.setClipToBounds(sub.layered)
+            node.setUseCompositingLayer(sub.layered, null)
+            val c = node.beginRecording(max(1, right - left), max(1, bottom - top))
+            try {
+                c.translate(-left.toFloat(), -top.toFloat())
+                for (n in sub.nodes) c.drawRenderNode(renderNode(n))
+            } finally {
+                node.endRecording()
+            }
+        }
+        val container = runNode(r)
+        val c = container.beginRecording()
+        try {
+            for (part in r.parts) {
+                when (part) {
+                    is SubRun -> c.drawRenderNode(subRunNode(part))
+                    is RuntimeNode -> c.drawRenderNode(renderNode(part))
+                }
+            }
+        } finally {
+            container.endRecording()
+        }
+    }
 
     /** The values last sent to a node's RenderNode, so unchanged ones aren't sent again. */
     private class Applied {
@@ -168,8 +240,17 @@ class SceneRenderer(private val text: TextLayouts, private val images: Images) {
     private fun drawContent(canvas: Canvas, n: RuntimeNode, runtime: SceneRuntime) {
         when (val c = n.content) {
             ContentSpec.Group -> {
-                if (n === runtime.root) runtime.background?.let { canvas.drawColor(it) }
-                for (child in n.children) canvas.drawRenderNode(renderNode(child))
+                if (n === runtime.root) {
+                    runtime.background?.let { canvas.drawColor(it) }
+                    for (entry in runtime.rootEntries) {
+                        when (entry) {
+                            is PageRun -> canvas.drawRenderNode(runNode(entry))
+                            is RuntimeNode -> canvas.drawRenderNode(renderNode(entry))
+                        }
+                    }
+                } else {
+                    for (child in n.children) canvas.drawRenderNode(renderNode(child))
+                }
             }
             is ContentSpec.Text -> drawText(canvas, n)
             is ContentSpec.Shape -> drawShape(canvas, n, c)
